@@ -18,12 +18,31 @@
 
 #include "qemu/lockable.h"
 
+
+#ifndef NO_EMU_HOOKS
+typedef struct DevFileOps {
+    // File operations
+    int (*llseek) (unsigned int fd, unsigned long offset_high, unsigned long offset_low, loff_t *result,
+                   unsigned int whence);
+	ssize_t (*read) (unsigned int fd, char * buf, size_t count);
+	ssize_t (*write) (unsigned int fd, char * buf, size_t count);
+    int (*ioctl) (int fd, unsigned long request, void *arg);
+} DevFileOps;
+
+typedef struct DevInfo {
+    DevFileOps ops;
+} DevInfo;
+#endif // !NO_EMU_HOOKS
+
 typedef abi_long (*TargetFdDataFunc)(void *, size_t);
 typedef abi_long (*TargetFdAddrFunc)(void *, abi_ulong, socklen_t);
 typedef struct TargetFdTrans {
     TargetFdDataFunc host_to_target_data;
     TargetFdDataFunc target_to_host_data;
     TargetFdAddrFunc target_to_host_addr;
+#ifndef NO_EMU_HOOKS
+    DevInfo *dev_info;
+#endif // !NO_EMU_HOOKS
 } TargetFdTrans;
 
 extern TargetFdTrans **target_fd_trans;
@@ -84,6 +103,21 @@ static inline TargetFdAddrFunc fd_trans_target_to_host_addr(int fd)
     }
     return NULL;
 }
+
+#ifndef NO_EMU_HOOKS
+static inline DevInfo * fd_trans_dev_info(int fd)
+{
+    if (fd < 0) {
+        return NULL;
+    }
+
+    QEMU_LOCK_GUARD(&target_fd_trans_lock);
+    if (fd < target_fd_max && target_fd_trans[fd]) {
+        return target_fd_trans[fd]->dev_info;
+    }
+    return NULL;
+}
+#endif // !NO_EMU_HOOKS
 
 static inline void internal_fd_trans_register_unsafe(int fd,
                                                      TargetFdTrans *trans)

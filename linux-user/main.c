@@ -82,6 +82,47 @@ unsigned long mmap_min_addr;
 uintptr_t guest_base;
 bool have_guest_base;
 
+#ifndef NO_EMU_HOOKS
+bool program_code_only = false;
+bool hackbind = false; // GREENHOUSE PATCH
+bool hackproc = false; // GREENHOUSE PATCH
+bool hacksysinfo = false; // GREENHOUSE PATCH
+bool hackhouse = false; // HOUSEFUZZ PATCH
+
+char *qemu_execve_path;
+
+static void handle_arg_execve(const char *arg)
+{
+    qemu_execve_path = strdup(arg);
+}
+
+static void handle_arg_pconly(const char *arg)
+{
+    // Is not used in the codebase
+    program_code_only = 1;
+}
+
+static void handle_arg_hackbind(const char *arg)
+{
+    hackbind = true;
+}
+
+static void handle_arg_hackproc(const char *arg)
+{
+    hackproc = true;
+}
+
+static void handle_arg_hacksysinfo(const char *arg)
+{
+    hacksysinfo = true;
+}
+
+static void handle_arg_hackhouse(const char *arg)
+{
+    hacksysinfo = true;
+}
+#endif
+
 /*
  * Used to implement backwards-compatibility for the `-strace`, and
  * QEMU_STRACE options. Without this, the QEMU_LOG can be overwritten by
@@ -534,6 +575,20 @@ static const struct qemu_argument arg_table[] = {
      "",           "Generate a /tmp/perf-${pid}.map file for perf"},
     {"jitdump",    "QEMU_JITDUMP",     false, handle_arg_jitdump,
      "",           "Generate a jit-${pid}.dump file for perf"},
+#ifndef NO_EMU_HOOKS
+    {"execve",     "QEMU_EXECVE",      true,   handle_arg_execve, // GREENHOUSE PATCH
+     "path",       "use interpreter at 'path' when a process calls execve()"},
+    {"pconly",     "QEMU_PCONLY",      false,   handle_arg_pconly, // GREENHOUSE PATCH
+     "",           "filter non-program code ranges when logging"},
+    {"hackbind",   "QEMU_HACKBIND",    false,   handle_arg_hackbind, // GREENHOUSE PATCH
+     "",           "use hack to get around ipv6 addrs and conflicting binds"},
+    {"hackproc",   "QEMU_HACKPROC",    false,   handle_arg_hackproc, // GREENHOUSE PATCH
+     "",           "use hack to get around needing to mount a writable /proc"},
+    {"hacksysinfo",   "QEMU_HACKSYSINFO",    false,   handle_arg_hacksysinfo, // GREENHOUSE PATCH
+     "",           "use hack to get around sysinfo reporting"},
+    {"hackhouse",   "QEMU_HACKHOUSE",    false,   handle_arg_hackhouse, // HOUSEFUZZ PATCH
+     "",           "use hack of housefuzz"},
+#endif
     {NULL, NULL, false, NULL, NULL, NULL}
 };
 
@@ -778,6 +833,9 @@ int main(int argc, char **argv, char **envp)
      * get binfmt_misc flags
      */
     preserve_argv0 = !!(qemu_getauxval(AT_FLAGS) & AT_FLAGS_PRESERVE_ARGV0);
+#ifndef NO_EMU_HOOKS
+    preserve_argv0 = 0; // XHY: Disable preserve_argv0
+#endif
 
     /*
      * Manage binfmt-misc preserve-arg[0] flag
@@ -1016,6 +1074,16 @@ int main(int argc, char **argv, char **envp)
     target_set_brk(info->brk);
     syscall_init();
     signal_init(rtsig_map);
+
+#ifndef NO_EMU_HOOKS
+    // GREENHOUSE PATCH
+    if (program_code_only == 1) {
+        char filter_buf[512]; //GREENHOUSE PATCH
+        memset(filter_buf, 0, 512);
+        snprintf(filter_buf, 512, "0x%lx..0x%lx", (unsigned long)info->start_code, (unsigned long)info->end_code);
+        qemu_set_dfilter_ranges(filter_buf, &error_fatal);
+    }
+#endif // !NO_EMU_HOOKS
 
     /* Now that we've loaded the binary, GUEST_BASE is fixed.  Delay
        generating the prologue until now so that the prologue can take

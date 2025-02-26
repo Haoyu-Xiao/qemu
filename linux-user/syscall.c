@@ -141,6 +141,9 @@
 #include "user/signal.h"
 #include "qemu/guest-random.h"
 #include "qemu/selfmap.h"
+#ifndef NO_EMU_HOOKS
+#include "qemu/log.h"
+#endif
 #include "user/syscall-trace.h"
 #include "special-errno.h"
 #include "qapi/error.h"
@@ -632,6 +635,34 @@ int copy_struct_from_user(void *dst, size_t ksize, abi_ptr src, size_t usize)
     }
     return 0;
 }
+
+#ifndef NO_EMU_HOOKS
+// GREENHOUSE PATCH
+static void parse_ghpath(const char* pathname, char* redirected_path) {
+    char* result;
+    char rpath[PATH_MAX - 2];
+
+    memset(rpath, 0, sizeof(rpath));
+    if (hackproc) {
+        result = realpath(pathname, rpath);
+        if (result == NULL) {
+            memset(rpath, 0, sizeof(rpath));
+            snprintf(rpath, sizeof(rpath)-1, "%s", pathname);
+        }
+
+        if (strncmp(rpath, "/proc/", 6) == 0) {
+            snprintf(redirected_path, PATH_MAX, "/ghproc/%s", rpath+6);
+            return;
+        }
+        else if (strncmp(rpath, "/dev/", 5) == 0) {
+            snprintf(redirected_path, PATH_MAX, "/ghdev/%s", rpath+5);
+            return;
+        }
+    }
+    snprintf(redirected_path, PATH_MAX, "%s", pathname);
+}
+// END GREENHOUSE PATCH
+#endif
 
 #define safe_syscall0(type, name) \
 static type safe_##name(void) \
@@ -2092,8 +2123,27 @@ static inline abi_long host_to_target_cmsg(struct target_msghdr *target_msgh,
 }
 
 /* do_setsockopt() Must return target values and target errnos. */
+#ifndef NO_EMU_HOOKS
+static abi_long do_setsockopt_bak(int sockfd, int level, int optname,
+                              abi_ulong optval_addr, socklen_t optlen);
+
+static abi_long do_setsockopt(int sockfd, int level, int optname,
+                              abi_ulong optval_addr, socklen_t optlen) {
+    int ret = do_setsockopt_bak(sockfd, level, optname, optval_addr, optlen);
+    // GREENHOUSE PATCH
+    if (hackbind && ret != 0) {
+        fprintf(stderr, "[qemu] Forcing setsockopt to return 0 even in failure cases\n");
+        ret = 0;
+    }
+    return ret;
+}
+
+static abi_long do_setsockopt_bak(int sockfd, int level, int optname,
+                              abi_ulong optval_addr, socklen_t optlen)
+#else
 static abi_long do_setsockopt(int sockfd, int level, int optname,
                               abi_ulong optval_addr, socklen_t optlen)
+#endif // ! NO_EMU_HOOKS
 {
     abi_long ret;
     int val;
@@ -3193,6 +3243,14 @@ static abi_long do_socket(int domain, int type, int protocol)
         return -TARGET_EPROTONOSUPPORT;
     }
 
+#ifndef NO_EMU_HOOKS
+    /* GREENHOUSE PATCH */
+    if (hackbind && domain == AF_INET6) {
+        // handle all ipv6 networking as ipv4
+        domain = AF_INET;
+    }
+#endif
+
     if (domain == AF_PACKET ||
         (domain == AF_INET && type == SOCK_PACKET)) {
         protocol = tswap16(protocol);
@@ -3227,10 +3285,126 @@ static abi_long do_socket(int domain, int type, int protocol)
     return ret;
 }
 
+#ifndef NO_EMU_HOOKS
+static int used_ports[512] = {0}; /* GREENHOUSE FIRMFUCK PATCH */
+static int ports_index = 0; /* GREENHOUSE FIRMFUCK PATCH */
+#endif // !NO_EMU_HOOKS
+
 /* do_bind() Must return target values and target errnos. */
 static abi_long do_bind(int sockfd, abi_ulong target_addr,
                         socklen_t addrlen)
 {
+#ifndef NO_EMU_HOOKS
+    void *addr = 0;
+    char ip[INET6_ADDRSTRLEN+1] = "";
+    unsigned short port = 0, newport = 0;
+    unsigned short reuse = 0, retries = 0;
+    void* cust_addr = 0;
+    abi_long ret;
+    sa_family_t family;
+
+    if ((int)addrlen < 0) {
+        return -TARGET_EINVAL;
+    }
+ 
+    addr = alloca(addrlen+1);
+    ret = target_to_host_sockaddr(sockfd, addr, target_addr, addrlen);
+    if (ret) 
+        return ret;
+
+    /* GREENHOUSE PATCH */
+    family = ((struct sockaddr*)addr)->sa_family;
+
+    if (hackbind && family == AF_INET) {
+        inet_ntop(AF_INET, &((struct sockaddr_in*)addr)->sin_addr, ip, sizeof(ip));
+        port = ntohs(((struct sockaddr_in*)addr)->sin_port);
+        fprintf(stderr, "[GreenHouseQEMU] IP: %s\n", ip);
+        fprintf(stderr, "[GreenHouseQEMU] PORT: %hu\n", port);
+
+        /* HouseFuzz PATCH */
+        // if found 192.168.*.1, convert to 0.0.0.0
+        if (strncmp(ip, "192.168.", 8) == 0 && ip[strlen(ip)-1] == '1') {
+            goto hackbind_0000;
+        }
+        goto hackbind_0001;
+    }
+    else if (hackbind && family == AF_INET6) {
+hackbind_0000:
+        cust_addr = alloca(sizeof(struct sockaddr_in));
+        /* GREENHOUSE PATCH */
+        // forces a ipv6 bind address to ipv4
+        port = ntohs(((struct sockaddr_in6*)addr)->sin6_port);
+        memset(((struct sockaddr_in*)cust_addr), 0, sizeof(struct sockaddr_in));
+
+        // ((struct sockaddr*)addr)->sa_family = AF_INET;
+        fprintf(stderr, "[qemu] Using custom bind, forcing ipv6 protocol to ipv4 on addr 0.0.0.0 port %d\n", port);
+        inet_pton(AF_INET, "0.0.0.0", &((struct sockaddr_in*)cust_addr)->sin_addr);
+        inet_ntop(AF_INET, &((struct sockaddr_in*)cust_addr)->sin_addr, ip, sizeof(ip));
+        ((struct sockaddr_in*)cust_addr)->sin_port = htons(port);
+        ((struct sockaddr_in*)cust_addr)->sin_family = AF_INET;
+        addr = cust_addr;
+        addrlen = sizeof(struct sockaddr_in);
+        fprintf(stderr, "[GreenHouseQEMU] IPV6: 0.0.0.0\n");
+        fprintf(stderr, "[GreenHouseQEMU] IPV6_PORT: %hu\n", (unsigned short)ntohs(((struct sockaddr_in*)addr)->sin_port));
+hackbind_0001:
+        /* GREENHOUSE PATCH */
+        newport = port;
+        retries = 0;
+        while (retries < 3) { // keep trying until we get a successful bind or exceed retries
+            // fprintf(stderr, "[qemu] Trying ip: %s on sockfd %d\n", ip, sockfd);
+    
+            // GREENHOUSE PATCH - create mark only if successful
+            ret = get_errno(bind(sockfd, addr, addrlen));
+            if (!ret) {
+                // create_mark(FIRMFUCK, "bind\n");  
+                fprintf(stderr, "[qemu] Successful Bind %d\n", (int)ret);
+                used_ports[ports_index] = newport;
+                ports_index = ports_index + 1;
+                return ret;
+            }
+            if (newport <= 0) {
+                if (((struct sockaddr*)addr)->sa_family == AF_INET6 || ((struct sockaddr*)addr)->sa_family == AF_INET) {
+                    fprintf(stderr, "[qemu] Forcing port %d to 80 and retrying...", newport);
+                    newport = 80;
+                }
+            }
+            else {
+                newport = newport + 1;
+                while(1) {
+                    reuse = 0;
+                    for (int i = 0; i < ports_index; i++) {
+                        if (newport == used_ports[i]) {
+                            newport = newport + 1;
+                            reuse = 1;
+                            break;
+                        }
+                    }
+                    if(reuse == 0) {
+                        break;
+                    }
+                }
+                fprintf(stderr, "[qemu] bind failed, retrying with port %d\n", newport);
+                retries = retries + 1;
+            }
+
+            ((struct sockaddr_in*)addr)->sin_port = htons(newport);
+        }
+    }
+    else {
+        if (hackbind && family == AF_UNIX) {
+            // Fix structure compatibility
+            if (addrlen) {
+                if (addrlen != sizeof(struct sockaddr_un)) {
+                    fprintf(stderr, "[qemu] Invalid addrlen %d, fix to %d\n", addrlen, (socklen_t)sizeof(struct sockaddr_un));
+                    addrlen = sizeof(struct sockaddr_un);
+                }
+            }
+        }
+        ret = get_errno(bind(sockfd, addr, addrlen));
+    }
+
+    return ret;
+#else
     void *addr;
     abi_long ret;
 
@@ -3245,6 +3419,7 @@ static abi_long do_bind(int sockfd, abi_ulong target_addr,
         return ret;
 
     return get_errno(bind(sockfd, addr, addrlen));
+#endif // NO_EMU_HOOKS
 }
 
 /* do_connect() Must return target values and target errnos. */
@@ -6708,6 +6883,25 @@ static void *clone_func(void *arg)
     return NULL;
 }
 
+#ifndef NO_EMU_HOOKS
+/* clone_func_hooked() is directly called by a new clone() thread to 
+    utilize the standard pthread functions. This should address
+    https://gitlab.com/qemu-project/qemu/-/issues/2112 */
+static void *clone_func_hooked(void *arg) {
+    pthread_attr_t attr;
+    new_thread_info *info = arg;
+
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, NEW_STACK_SIZE);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+    pthread_create(&info->thread, &attr, clone_func, info);
+
+    pthread_attr_destroy(&attr);
+    return NULL;
+}
+#endif
+
 /* do_fork() Must return host values and target errnos (unlike most
    do_*() functions). */
 static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
@@ -6732,10 +6926,16 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         new_thread_info info;
         pthread_attr_t attr;
 
+#ifndef NO_EMU_HOOKS
+        if (flags & CLONE_INVALID_THREAD_FLAGS) {
+            return -TARGET_EINVAL;
+        }
+#else
         if (((flags & CLONE_THREAD_FLAGS) != CLONE_THREAD_FLAGS) ||
             (flags & CLONE_INVALID_THREAD_FLAGS)) {
             return -TARGET_EINVAL;
         }
+#endif // !NO_EMU_HOOKS
 
         ts = g_new0(TaskState, 1);
         init_task_state(ts);
@@ -6810,7 +7010,27 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         sigprocmask(SIG_BLOCK, &sigmask, &info.sigmask);
         cpu->random_seed = qemu_guest_random_seed_thread_part1();
 
+#ifndef NO_EMU_HOOKS
+        if ((flags & CLONE_THREAD_FLAGS) != CLONE_THREAD_FLAGS) {
+            typedef int (*clone_func_t)(void *);
+            void *new_thread_stack = malloc(NEW_STACK_SIZE);
+            if (new_thread_stack == NULL) {
+                ret = -1;
+            } else {
+                ret = clone((clone_func_t) clone_func_hooked, new_thread_stack + NEW_STACK_SIZE, flags, &info);
+                if (ret < 0) {
+                    free(new_thread_stack);
+                    ret = -1;
+                } else {
+                    ret = 0;
+                }
+            }
+        } else {
+            ret = pthread_create(&info.thread, &attr, clone_func, &info);
+        }
+#else
         ret = pthread_create(&info.thread, &attr, clone_func, &info);
+#endif
         /* TODO: Free new CPU state if thread creation failed.  */
 
         sigprocmask(SIG_SETMASK, &info.sigmask, NULL);
@@ -8570,9 +8790,9 @@ static int maybe_do_fake_open(CPUArchState *cpu_env, int dirfd,
 #endif
         { NULL, NULL, NULL }
     };
-
     /* if this is a file from /proc/ filesystem, expand full name */
     proc_name = realpath(fname, NULL);
+
     if (proc_name && strncmp(proc_name, "/proc/", 6) == 0) {
         pathname = proc_name;
     } else {
@@ -8723,6 +8943,106 @@ ssize_t do_guest_readlink(const char *pathname, char *buf, size_t bufsiz)
     return ret;
 }
 
+#ifndef NO_EMU_HOOKS
+#define BINPRM_BUF_SIZE 128
+
+/* GREENHOUSE_PATCH */
+/* qemu_execve() Must return target values and target errnos. */
+static abi_long qemu_execve(const char *filename, char **argv,
+                  char **envp)
+{
+    char *i_arg = NULL, *i_name = NULL;
+    char **new_argp;
+    int argc, fd, ret, i, offset = 3;
+    int tok_count = 0;
+    char *token;
+    char *qemu_path_tokens;
+    char *qemu_path;
+    char buf[BINPRM_BUF_SIZE];
+
+    fprintf(stderr, "[qemu] doing qemu_execven on filename %s\n", filename);
+    memset(buf, 0, BINPRM_BUF_SIZE);
+
+    for (argc = 0; argv[argc] != NULL; argc++);
+
+    fd = open(filename, O_RDONLY);
+    if (fd < 0) {
+        return -ENOENT;
+    }
+
+    ret = read(fd, buf, BINPRM_BUF_SIZE);
+    if (ret == -1) {
+        close(fd);
+        return -ENOENT;
+    }
+
+    close(fd);
+
+    qemu_path_tokens = strdup(qemu_execve_path);
+    token = strtok(qemu_path_tokens, " ");
+    qemu_path = strdup(token);
+    token = strtok(NULL, " ");
+    while (token != NULL) {
+        token = strtok(NULL, " ");
+        tok_count += 1;
+    }
+    offset += 2 + tok_count;
+
+    new_argp = alloca((argc + offset + 1) * sizeof(void *));
+    /* Copy the original arguments with offset */
+    for (i = 0; i < argc; i++) {
+        new_argp[i + offset] = strdup(argv[i]);
+    }
+
+    new_argp[0] = strdup(qemu_path);
+    new_argp[1] = strdup("-0");
+
+    if (i_name) {
+        new_argp[2] = i_name;
+        offset -= 1; // iname is 2nd and 2nd last arg
+
+    } else {
+        new_argp[2] = strdup(argv[0]);
+    }
+
+    qemu_path_tokens = strdup(qemu_execve_path);
+    token = strtok(qemu_path_tokens, " ");
+    while (tok_count > 0 && token != NULL) {
+        token = strtok(NULL, " ");
+        new_argp[offset - 2 - tok_count] = strdup(token);
+        tok_count -= 1;
+    }
+
+    new_argp[offset - 2] = strdup("-execve");
+    new_argp[offset - 1] = strdup(qemu_execve_path);
+
+    if (i_name) {
+        offset += 1; // iname is 2nd and 2nd last arg
+        new_argp[offset - 1] = i_name;
+
+        if (i_arg) {
+            new_argp[offset - 2] = i_name;
+            new_argp[offset - 1] = i_arg;
+        }
+    }
+
+    new_argp[offset] = strdup(filename);
+    new_argp[argc + offset] = NULL;
+
+    return get_errno(execve(qemu_path, new_argp, envp));
+}
+
+/* Implement with qemu_execve */
+static abi_long qemu_execveat(int dirfd, const char *filename, char **argv,
+                  char **envp, int flags)
+{
+    // FIXME: Implement this
+    return qemu_execve(filename, argv, envp);
+}
+
+/* END GREENHOUSE_PATCH */
+#endif // NO_EMU_HOOKS
+
 static int do_execv(CPUArchState *cpu_env, int dirfd,
                     abi_long pathname, abi_long guest_argp,
                     abi_long guest_envp, int flags, bool is_execveat)
@@ -8808,9 +9128,20 @@ static int do_execv(CPUArchState *cpu_env, int dirfd,
     if (is_proc_myself(p, "exe")) {
         exe = exec_path;
     }
+#ifndef NO_EMU_HOOKS
+    ret = is_execveat
+        ? qemu_execveat(dirfd, exe, argp, envp, flags)
+        : qemu_execve(exe, argp, envp);
+    if (0) {
+        ret = is_execveat
+            ? safe_execveat(dirfd, exe, argp, envp, flags)
+            : safe_execve(exe, argp, envp);
+    }
+#else
     ret = is_execveat
         ? safe_execveat(dirfd, exe, argp, envp, flags)
         : safe_execve(exe, argp, envp);
+#endif // !NO_EMU_HOOKS
     ret = get_errno(ret);
 
     unlock_user(p, pathname, 0);
@@ -9460,6 +9791,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
     struct statfs stfs;
 #endif
     void *p;
+#ifndef NO_EMU_HOOKS
+    char redirected_path[PATH_MAX+1];
+    memset(redirected_path, 0, sizeof(redirected_path));
+#endif
 
     switch(num) {
     case TARGET_NR_exit:
@@ -9547,6 +9882,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
     case TARGET_NR_open:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
+#ifndef NO_EMU_HOOKS
+        parse_ghpath(p, redirected_path);
+        p = redirected_path;
+#endif
         ret = get_errno(do_guest_openat(cpu_env, AT_FDCWD, p,
                                   target_to_host_bitmask(arg2, fcntl_flags_tbl),
                                   arg3, true));
@@ -9557,6 +9896,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
     case TARGET_NR_openat:
         if (!(p = lock_user_string(arg2)))
             return -TARGET_EFAULT;
+#ifndef NO_EMU_HOOKS
+        parse_ghpath(p, redirected_path);
+        p = redirected_path;
+#endif
         ret = get_errno(do_guest_openat(cpu_env, arg1, p,
                                   target_to_host_bitmask(arg3, fcntl_flags_tbl),
                                   arg4, true));
@@ -9607,10 +9950,42 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         return get_errno(pidfd_getfd(arg1, arg2, arg3));
 #endif
     case TARGET_NR_close:
+        // GREENHOUSE PATCH: disable closing for select files
+#ifndef NO_EMU_HOOKS
+        if (arg1 == qemu_log_fd()) {
+            fprintf(stderr, "[qemu] not closing %d\n", (int)arg1);
+            return 0;
+        }
+#endif // NO_EMU_HOOKS
         fd_trans_unregister(arg1);
         return get_errno(close(arg1));
 #if defined(__NR_close_range) && defined(TARGET_NR_close_range)
     case TARGET_NR_close_range:
+#ifndef NO_EMU_HOOKS
+        // The following code is not tested
+        int log_fd = qemu_log_fd();
+        if (log_fd >= 0) {
+            if (arg1 <= log_fd && arg2 >= log_fd) {
+                fprintf(stderr, "[qemu] not closing %d\n", (int)log_fd);
+                if (arg1 == arg2) {
+                    return 0;
+                } else if (arg1 == log_fd) {
+                    do_syscall1(cpu_env, num, arg1 + 1, arg2, 
+                                arg3, arg4, arg5, arg6, arg7, arg8);
+                } else if (arg2 == log_fd) {
+                    do_syscall1(cpu_env, num, arg1, arg2 - 1, 
+                                arg3, arg4, arg5, arg6, arg7, arg8);
+                } else {
+                    // FIXME: consider both return values
+                    do_syscall1(cpu_env, num, arg1, log_fd - 1, 
+                                arg3, arg4, arg5, arg6, arg7, arg8);
+                    return do_syscall1(cpu_env, num, log_fd + 1, arg2, 
+                                arg3, arg4, arg5, arg6, arg7, arg8);
+                }
+                return 0;
+            }
+        }
+#endif
         ret = get_errno(sys_close_range(arg1, arg2, arg3));
         if (ret == 0 && !(arg3 & CLOSE_RANGE_CLOEXEC)) {
             abi_long fd, maxfd;
@@ -9993,6 +10368,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (!(p = lock_user_string(arg1))) {
             return -TARGET_EFAULT;
         }
+#ifndef NO_EMU_HOOKS
+        parse_ghpath(p, redirected_path);
+        p = redirected_path;
+#endif
         ret = get_errno(access(path(p), arg2));
         unlock_user(p, arg1, 0);
         return ret;
@@ -10002,6 +10381,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (!(p = lock_user_string(arg2))) {
             return -TARGET_EFAULT;
         }
+#ifndef NO_EMU_HOOKS
+        parse_ghpath(p, redirected_path);
+        p = redirected_path;
+#endif
         ret = get_errno(faccessat(arg1, p, arg3, 0));
         unlock_user(p, arg2, 0);
         return ret;
@@ -10011,6 +10394,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (!(p = lock_user_string(arg2))) {
             return -TARGET_EFAULT;
         }
+#ifndef NO_EMU_HOOKS
+        parse_ghpath(p, redirected_path);
+        p = redirected_path;
+#endif
         ret = get_errno(faccessat(arg1, p, arg3, arg4));
         unlock_user(p, arg2, 0);
         return ret;
@@ -10151,7 +10538,19 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         return ret;
 #endif
     case TARGET_NR_ioctl:
+#ifndef NO_EMU_HOOKS
+        ret = do_ioctl(arg1, arg2, arg3);
+        // Forcing ioctl return success code will reduce success rate of emulation,
+        // which means some 
+        // if (ret < 0) {
+        //     fprintf(stderr, "[qemu] Forcing ioctl(%ld, %ld, ...) = %d => 0\n",
+        //             (long int) arg1, (long int) arg2, (int)ret);
+        //     return 0;
+        // }
+        return ret;
+#else
         return do_ioctl(arg1, arg2, arg3);
+#endif
 #ifdef TARGET_NR_fcntl
     case TARGET_NR_fcntl:
         return do_fcntl(arg1, arg2, arg3);
@@ -11142,6 +11541,15 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
 #ifdef TARGET_NR_setsockopt
     case TARGET_NR_setsockopt:
         return do_setsockopt(arg1, arg2, arg3, arg4, (socklen_t) arg5);
+#ifndef NO_EMU_HOOKS
+        ret = do_setsockopt(arg1, arg2, arg3, arg4, (socklen_t) arg5);
+        // HOUSEFUZZ PATCH
+        if (hackbind && ret != 0) {
+            fprintf(stderr, "[qemu] Forcing setsockopt to return 0 even in failure cases\n");
+            ret = 0;
+        }
+        return ret;
+#endif // NO_EMU_HOOKS
 #endif
 #if defined(TARGET_NR_syslog)
     case TARGET_NR_syslog:
@@ -11224,6 +11632,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (!(p = lock_user_string(arg1))) {
             return -TARGET_EFAULT;
         }
+#ifndef NO_EMU_HOOKS
+        parse_ghpath(p, redirected_path);
+        p = redirected_path;
+#endif
         ret = get_errno(stat(path(p), &st));
         unlock_user(p, arg1, 0);
         goto do_stat;
@@ -11233,6 +11645,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (!(p = lock_user_string(arg1))) {
             return -TARGET_EFAULT;
         }
+#ifndef NO_EMU_HOOKS
+        parse_ghpath(p, redirected_path);
+        p = redirected_path;
+#endif
         ret = get_errno(lstat(path(p), &st));
         unlock_user(p, arg1, 0);
         goto do_stat;
@@ -11333,6 +11749,13 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
                 __put_user(value.loads[0], &target_value->loads[0]);
                 __put_user(value.loads[1], &target_value->loads[1]);
                 __put_user(value.loads[2], &target_value->loads[2]);
+#ifndef NO_EMU_HOOKS
+                if (hacksysinfo) {
+                    __put_user(0, &target_value->loads[0]);
+                    __put_user(0, &target_value->loads[1]);
+                    __put_user(0, &target_value->loads[2]);
+                }
+#endif
                 __put_user(value.totalram, &target_value->totalram);
                 __put_user(value.freeram, &target_value->freeram);
                 __put_user(value.sharedram, &target_value->sharedram);
@@ -12091,6 +12514,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (!(p = lock_user_string(arg1))) {
             return -TARGET_EFAULT;
         }
+#ifndef NO_EMU_HOOKS
+        parse_ghpath(p, redirected_path);
+        p = redirected_path;
+#endif
         ret = get_errno(stat(path(p), &st));
         unlock_user(p, arg1, 0);
         if (!is_error(ret))
@@ -12102,6 +12529,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (!(p = lock_user_string(arg1))) {
             return -TARGET_EFAULT;
         }
+#ifndef NO_EMU_HOOKS
+        parse_ghpath(p, redirected_path);
+        p = redirected_path;
+#endif
         ret = get_errno(lstat(path(p), &st));
         unlock_user(p, arg1, 0);
         if (!is_error(ret))
@@ -12125,6 +12556,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (!(p = lock_user_string(arg2))) {
             return -TARGET_EFAULT;
         }
+#ifndef NO_EMU_HOOKS
+        parse_ghpath(p, redirected_path);
+        p = redirected_path;
+#endif
         ret = get_errno(fstatat(arg1, path(p), &st, arg4));
         unlock_user(p, arg2, 0);
         if (!is_error(ret))

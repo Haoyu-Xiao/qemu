@@ -1,0 +1,1 @@
+    { "/dev/nvram", nvram_open_dev, is_proc },
