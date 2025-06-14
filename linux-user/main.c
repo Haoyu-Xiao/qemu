@@ -88,6 +88,8 @@ bool hackbind = false; // GREENHOUSE PATCH
 bool hackproc = false; // GREENHOUSE PATCH
 bool hacksysinfo = false; // GREENHOUSE PATCH
 bool hackhouse = false; // HOUSEFUZZ PATCH
+int hackwrite_fd_count = 0; // HOUSEFUZZ PATCH
+int hackwrite_fds[MAX_HACKWRITE_FDS] = {0}; // HOUSEFUZZ PATCH
 
 char *qemu_execve_path;
 
@@ -120,6 +122,20 @@ static void handle_arg_hacksysinfo(const char *arg)
 static void handle_arg_hackhouse(const char *arg)
 {
     hacksysinfo = true;
+}
+
+static void handle_arg_hackwrite(const char *arg)
+{
+    if (hackwrite_fd_count >= MAX_HACKWRITE_FDS) {
+        fprintf(stderr, "Too many hackwrite fds specified\n");
+        exit(EXIT_FAILURE);
+    }
+    int fd = atoi(arg);
+    if (fd < 0) {
+        fprintf(stderr, "Invalid hackwrite fd %d\n", fd);
+        exit(EXIT_FAILURE);
+    }
+    hackwrite_fds[hackwrite_fd_count++] = fd;
 }
 #endif
 
@@ -584,10 +600,12 @@ static const struct qemu_argument arg_table[] = {
      "",           "use hack to get around ipv6 addrs and conflicting binds"},
     {"hackproc",   "QEMU_HACKPROC",    false,   handle_arg_hackproc, // GREENHOUSE PATCH
      "",           "use hack to get around needing to mount a writable /proc"},
-    {"hacksysinfo",   "QEMU_HACKSYSINFO",    false,   handle_arg_hacksysinfo, // GREENHOUSE PATCH
+    {"hacksysinfo","QEMU_HACKSYSINFO", false,   handle_arg_hacksysinfo, // GREENHOUSE PATCH
      "",           "use hack to get around sysinfo reporting"},
-    {"hackhouse",   "QEMU_HACKHOUSE",    false,   handle_arg_hackhouse, // HOUSEFUZZ PATCH
+    {"hackhouse",  "QEMU_HACKHOUSE",   false,   handle_arg_hackhouse, // HOUSEFUZZ PATCH
      "",           "use hack of housefuzz"},
+    {"hackwrite",  "QEMU_HACKWRITE",   true,    handle_arg_hackwrite, // HOUSEFUZZ PATCH
+     "",           "dump output of given fd to log file"},
 #endif
     {NULL, NULL, false, NULL, NULL, NULL}
 };

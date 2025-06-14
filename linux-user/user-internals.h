@@ -35,6 +35,9 @@ extern bool hackbind; // GREENHOUSE_PATCH
 extern bool hackproc; // GREENHOUSE_PATCH
 extern bool hacksysinfo; // GREENHOUSE_PATCH
 extern bool hackhouse; // HOUSEFUZZ PATCH
+#define MAX_HACKWRITE_FDS 0x20 // HOUSEFUZZ PATCH
+extern int hackwrite_fd_count; // HOUSEFUZZ PATCH
+extern int hackwrite_fds[MAX_HACKWRITE_FDS]; // HOUSEFUZZ PATCH
 #endif
 
 typedef struct IOCTLEntry IOCTLEntry;

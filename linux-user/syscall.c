@@ -270,6 +270,14 @@ static type name (type1 arg1,type2 arg2,type3 arg3,type4 arg4,type5 arg5,	\
 	return syscall(__NR_##name, arg1, arg2, arg3, arg4, arg5, arg6);	\
 }
 
+#ifndef NO_EMU_HOOKS
+#define TARGET_NR_nvram_nonce   0x300
+#define TARGET_NR_nvram_get     0x301
+#define TARGET_NR_nvram_read    0x302
+#define TARGET_NR_nvram_set     0x303
+#define TARGET_NR_nvram_search  0x304
+#define TARGET_NR_nvram_replace 0x305
+#endif
 
 #define __NR_sys_uname __NR_uname
 #define __NR_sys_getcwd1 __NR_getcwd
@@ -637,7 +645,6 @@ int copy_struct_from_user(void *dst, size_t ksize, abi_ptr src, size_t usize)
 }
 
 #ifndef NO_EMU_HOOKS
-// GREENHOUSE PATCH
 static void parse_ghpath(const char* pathname, char* redirected_path) {
     char* result;
     char rpath[PATH_MAX - 2];
@@ -650,10 +657,10 @@ static void parse_ghpath(const char* pathname, char* redirected_path) {
             snprintf(rpath, sizeof(rpath)-1, "%s", pathname);
         }
 
-        if (strncmp(rpath, "/proc/", 6) == 0) {
-            snprintf(redirected_path, PATH_MAX, "/ghproc/%s", rpath+6);
-            return;
-        }
+        // if (strncmp(rpath, "/proc/", 6) == 0) {
+        //     snprintf(redirected_path, PATH_MAX, "/ghproc/%s", rpath+6);
+        //     return;
+        // }
         else if (strncmp(rpath, "/dev/", 5) == 0) {
             snprintf(redirected_path, PATH_MAX, "/ghdev/%s", rpath+5);
             return;
@@ -661,7 +668,20 @@ static void parse_ghpath(const char* pathname, char* redirected_path) {
     }
     snprintf(redirected_path, PATH_MAX, "%s", pathname);
 }
-// END GREENHOUSE PATCH
+
+static void dump_write(abi_long fd, const char *buf, abi_long size) {
+    for (int i = 0; i < hackwrite_fd_count; i++) {
+        if (hackwrite_fds[i] == fd) {
+            char *encode_buf = malloc(10 + 2 * size + 1);
+            for (abi_long j = 0; j < size; j++) {
+                snprintf(encode_buf + 2 * j, 3, "%02x", (unsigned char)buf[j]);
+            }
+            qemu_log_mask(LOG_STRACE, "|%d,%s", (int)fd, encode_buf);
+            return;
+        }
+    }
+}
+
 #endif
 
 #define safe_syscall0(type, name) \
@@ -9870,10 +9890,12 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             ret = fd_trans_target_to_host_data(arg1)(copy, arg3);
             if (ret >= 0) {
                 ret = get_errno(safe_write(arg1, copy, ret));
+                dump_write(arg1, copy, ret);
             }
             g_free(copy);
         } else {
             ret = get_errno(safe_write(arg1, p, arg3));
+            dump_write(arg1, p, arg3);
         }
         unlock_user(p, arg2, 0);
         return ret;
@@ -10414,6 +10436,13 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         return get_errno(syncfs(arg1));
 #endif
     case TARGET_NR_kill:
+#ifndef NO_EMU_HOOKS
+        // Avoid killing init process
+        if ((arg1 == 1 || (arg1 < 0 && getpid() == 1)) &&
+            arg2 != TARGET_SIGUSR1 && arg2 != TARGET_SIGUSR2) {
+            return 0;
+        }
+#endif
         return get_errno(safe_kill(arg1, target_to_host_signal(arg2)));
 #ifdef TARGET_NR_rename
     case TARGET_NR_rename:

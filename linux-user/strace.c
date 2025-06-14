@@ -4469,7 +4469,7 @@ print_syscall(CPUArchState *cpu_env, int num,
     if (!f) {
         return;
     }
-    fprintf(f, "%d ", get_task_state(env_cpu(cpu_env))->ts_tid);
+    fprintf(f, "%d ", gettid());
 
     for (i = 0; i < nsyscalls; i++) {
         if (scnames[i].nr == num) {
