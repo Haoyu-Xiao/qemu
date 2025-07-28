@@ -649,22 +649,24 @@ static void parse_ghpath(const char* pathname, char* redirected_path) {
     char* result;
     char rpath[PATH_MAX - 2];
 
-    memset(rpath, 0, sizeof(rpath));
     if (hackproc) {
+        memset(rpath, 0, sizeof(rpath));
         result = realpath(pathname, rpath);
         if (result == NULL) {
             memset(rpath, 0, sizeof(rpath));
             snprintf(rpath, sizeof(rpath)-1, "%s", pathname);
         }
 
-        // if (strncmp(rpath, "/proc/", 6) == 0) {
-        //     snprintf(redirected_path, PATH_MAX, "/ghproc/%s", rpath+6);
+        if (strncmp(rpath, "/proc/", 6) == 0) {
+            snprintf(redirected_path, PATH_MAX, "/proc0/%s", rpath+6);
+            if (access(redirected_path, F_OK) == 0) {
+                return;
+            }
+        }
+        // else if (strncmp(rpath, "/dev/", 5) == 0) {
+        //     snprintf(redirected_path, PATH_MAX, "/ghdev/%s", rpath+5);
         //     return;
         // }
-        else if (strncmp(rpath, "/dev/", 5) == 0) {
-            snprintf(redirected_path, PATH_MAX, "/ghdev/%s", rpath+5);
-            return;
-        }
     }
     snprintf(redirected_path, PATH_MAX, "%s", pathname);
 }
@@ -5813,6 +5815,69 @@ IOCTLEntry ioctl_entries[] = {
     { 0, 0, },
 };
 
+#ifndef NO_EMU_HOOKS
+
+// Assume host is x64
+#define HOST_IOC_NRBITS       8
+#define HOST_IOC_TYPEBITS     8
+#define HOST_IOC_SIZEBITS     14
+#define HOST_IOC_DIRBITS      2
+
+#define HOST_IOC_NRMASK       ((1 << HOST_IOC_NRBITS)-1)
+#define HOST_IOC_TYPEMASK     ((1 << HOST_IOC_TYPEBITS)-1)
+#define HOST_IOC_SIZEMASK     ((1 << HOST_IOC_SIZEBITS)-1)
+#define HOST_IOC_DIRMASK      ((1 << HOST_IOC_DIRBITS)-1)
+
+#define HOST_IOC_NRSHIFT      0
+#define HOST_IOC_TYPESHIFT    (HOST_IOC_NRSHIFT+HOST_IOC_NRBITS)
+#define HOST_IOC_SIZESHIFT    (HOST_IOC_TYPESHIFT+HOST_IOC_TYPEBITS)
+#define HOST_IOC_DIRSHIFT     (HOST_IOC_SIZESHIFT+HOST_IOC_SIZEBITS)
+
+#define HOST_IOC_NONE   0U
+#define HOST_IOC_WRITE  1U
+#define HOST_IOC_READ   2U
+
+// Mainly convert size and direction bits to target format
+static inline int ioctl_cmd_trans(int cmd) {
+#if defined(TARGET_I386) || defined(TARGET_ARM) || defined(TARGET_SH4)  \
+    || defined(TARGET_M68K) || defined(TARGET_CRIS)                     \
+    || defined(TARGET_S390X) || defined(TARGET_OPENRISC)                \
+    || defined(TARGET_RISCV)                                            \
+    || defined(TARGET_XTENSA) || defined(TARGET_LOONGARCH64) \
+    || defined(TARGET_HEXAGON)
+    return cmd;
+#elif defined(TARGET_PPC) || defined(TARGET_ALPHA) ||           \
+    defined(TARGET_SPARC) || defined(TARGET_MICROBLAZE) ||      \
+    defined(TARGET_MIPS) || defined(TARGET_HPPA)
+    int dir = (cmd >> TARGET_IOC_DIRSHIFT) & TARGET_IOC_DIRMASK;
+    switch (dir) {
+    case TARGET_IOC_NONE:
+        dir = HOST_IOC_NONE;
+        break;
+    case TARGET_IOC_READ:
+        dir = HOST_IOC_READ;
+        break;
+    case TARGET_IOC_WRITE:
+        dir = HOST_IOC_WRITE;
+        break;
+    default:
+        dir = HOST_IOC_NONE;
+        // fprintf(stderr, "Unsupported ioctl direction: cmd=0x%04lx, dir=%d\n",
+        //                 (long)cmd, dir);
+        // qemu_log_mask(LOG_UNIMP, "Unsupported ioctl direction: cmd=0x%04lx\n",
+                    //   (long)cmd);
+        return cmd;
+    }
+    int new_cmd = (cmd & ((1 << TARGET_IOC_SIZESHIFT) - 1)) | \
+        ((((cmd >> TARGET_IOC_SIZESHIFT) & TARGET_IOC_SIZEMASK & HOST_IOC_SIZEMASK) << HOST_IOC_SIZESHIFT)) | \
+        (dir << HOST_IOC_DIRSHIFT);
+    // fprintf(stderr, "ioctl cmd %x -> %x\n", cmd, new_cmd);
+    return new_cmd;
+#endif
+}
+
+#endif // !NO_EMU_HOOKS
+
 /* ??? Implement proper locking for ioctls.  */
 /* do_ioctl() Must return target values and target errnos. */
 static abi_long do_ioctl(int fd, int cmd, abi_long arg)
@@ -5827,9 +5892,13 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
     ie = ioctl_entries;
     for(;;) {
         if (ie->target_cmd == 0) {
+#ifndef NO_EMU_HOOKS
+            return get_errno(safe_ioctl(fd, ioctl_cmd_trans(cmd), arg));
+#else
             qemu_log_mask(
                 LOG_UNIMP, "Unsupported ioctl: cmd=0x%04lx\n", (long)cmd);
             return -TARGET_ENOTTY;
+#endif // !NO_EMU_HOOKS
         }
         if (ie->target_cmd == cmd)
             break;
@@ -8818,6 +8887,7 @@ static int maybe_do_fake_open(CPUArchState *cpu_env, int dirfd,
     } else {
         pathname = fname;
     }
+// #endif
 
     if (is_proc_myself(pathname, "exe")) {
         /* Honor openat2 resolve flags */
@@ -8980,7 +9050,7 @@ static abi_long qemu_execve(const char *filename, char **argv,
     char *qemu_path;
     char buf[BINPRM_BUF_SIZE];
 
-    fprintf(stderr, "[qemu] doing qemu_execven on filename %s\n", filename);
+    // fprintf(stderr, "[qemu] doing qemu_execven on filename %s\n", filename);
     memset(buf, 0, BINPRM_BUF_SIZE);
 
     for (argc = 0; argv[argc] != NULL; argc++);
@@ -9149,10 +9219,12 @@ static int do_execv(CPUArchState *cpu_env, int dirfd,
         exe = exec_path;
     }
 #ifndef NO_EMU_HOOKS
-    ret = is_execveat
+    if (qemu_execve_path) {
+        ret = is_execveat
         ? qemu_execveat(dirfd, exe, argp, envp, flags)
         : qemu_execve(exe, argp, envp);
-    if (0) {
+    }
+    else {
         ret = is_execveat
             ? safe_execveat(dirfd, exe, argp, envp, flags)
             : safe_execve(exe, argp, envp);
@@ -9868,6 +9940,15 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (arg2 == 0 && arg3 == 0) {
             return get_errno(safe_read(arg1, 0, 0));
         } else {
+#ifndef NO_EMU_HOOKS
+            // Write to hackread device
+            if (hacksyscall_fd(read) > 0 && arg3 <= 0x100) {
+                if (!(p = lock_user(VERIFY_READ, arg2, arg3, 0)))
+                    return -TARGET_EFAULT;
+                ret = get_errno(safe_write(hacksyscall_fd(read), p, arg3));
+                unlock_user(p, arg2, ret);
+            }
+#endif
             if (!(p = lock_user(VERIFY_WRITE, arg2, arg3, 0)))
                 return -TARGET_EFAULT;
             ret = get_errno(safe_read(arg1, p, arg3));
@@ -10164,6 +10245,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         unlock_user(p, arg1, 0);
         return ret;
 #endif
+
 #ifdef TARGET_NR_lseek
     case TARGET_NR_lseek:
         return get_errno(lseek(arg1, arg2, arg3));

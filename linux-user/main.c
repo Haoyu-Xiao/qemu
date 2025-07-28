@@ -90,6 +90,7 @@ bool hacksysinfo = false; // GREENHOUSE PATCH
 bool hackhouse = false; // HOUSEFUZZ PATCH
 int hackwrite_fd_count = 0; // HOUSEFUZZ PATCH
 int hackwrite_fds[MAX_HACKWRITE_FDS] = {0}; // HOUSEFUZZ PATCH
+int hacksyscall_fds[MAX_HACKSYSCALL_FDS] = {0};
 
 char *qemu_execve_path;
 
@@ -126,16 +127,42 @@ static void handle_arg_hackhouse(const char *arg)
 
 static void handle_arg_hackwrite(const char *arg)
 {
-    if (hackwrite_fd_count >= MAX_HACKWRITE_FDS) {
-        fprintf(stderr, "Too many hackwrite fds specified\n");
+    char * args = strdup(arg);
+    // use strtok to split the args by comma
+    char *token = strtok(args, ",");
+    while (token != NULL) {
+        // convert the token to an integer and store it in the array
+        int fd = atoi(token);
+        if (fd < 0) {
+            fprintf(stderr, "Invalid hackwrite fd %d\n", fd);
+            exit(EXIT_FAILURE);
+        }
+        if (hackwrite_fd_count >= MAX_HACKWRITE_FDS) {
+            fprintf(stderr, "Too many hackwrite fds specified\n");
+            exit(EXIT_FAILURE);
+        }
+        hackwrite_fds[hackwrite_fd_count++] = fd;
+        token = strtok(NULL, ",");
+    }
+}
+
+#define register_hacksyscall(name) do { \
+    hacksyscall_fd(name) = open(hacksyscall_path(name), O_WRONLY); \
+} while (0)
+static void handle_arg_hacksyscall(const char *arg)
+{
+    if (!strcmp(arg, "read")) {
+        register_hacksyscall(read);
+    } else if (!strcmp(arg, "write")) {
+        register_hacksyscall(write);
+    } else if (!strcmp(arg, "open")) {
+        register_hacksyscall(open);
+    } else if (!strcmp(arg, "ioctl")) {
+        register_hacksyscall(ioctl);
+    } else {
+        fprintf(stderr, "Unsupported hacksyscall operation: %s\n", arg);
         exit(EXIT_FAILURE);
     }
-    int fd = atoi(arg);
-    if (fd < 0) {
-        fprintf(stderr, "Invalid hackwrite fd %d\n", fd);
-        exit(EXIT_FAILURE);
-    }
-    hackwrite_fds[hackwrite_fd_count++] = fd;
 }
 #endif
 
@@ -606,6 +633,8 @@ static const struct qemu_argument arg_table[] = {
      "",           "use hack of housefuzz"},
     {"hackwrite",  "QEMU_HACKWRITE",   true,    handle_arg_hackwrite, // HOUSEFUZZ PATCH
      "",           "dump output of given fd to log file"},
+    {"hacksyscall","QEMU_HACKSYSCALL", true,   handle_arg_hacksyscall, // HOUSEFUZZ PATCH
+     "",           "dump syscall information to /dev/hacksyscall/*"},
 #endif
     {NULL, NULL, false, NULL, NULL, NULL}
 };
@@ -851,9 +880,9 @@ int main(int argc, char **argv, char **envp)
      * get binfmt_misc flags
      */
     preserve_argv0 = !!(qemu_getauxval(AT_FLAGS) & AT_FLAGS_PRESERVE_ARGV0);
-#ifndef NO_EMU_HOOKS
-    preserve_argv0 = 0; // XHY: Disable preserve_argv0
-#endif
+// #ifndef NO_EMU_HOOKS
+//     preserve_argv0 = 0; // XHY: Disable preserve_argv0
+// #endif
 
     /*
      * Manage binfmt-misc preserve-arg[0] flag

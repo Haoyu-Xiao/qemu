@@ -147,6 +147,7 @@ static FILE *qemu_log_trylock_with_err(Error **errp)
                                  filename, log_thread_id());
                 return NULL;
             }
+            chmod(filename, 0666);
 #ifndef NO_EMU_HOOKS
             prev_thread_id = log_thread_id();
             QEMU_LOCK_GUARD(&global_mutex);
