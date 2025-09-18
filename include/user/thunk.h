@@ -146,6 +146,35 @@ static inline int thunk_type_size(const argtype *type_ptr, int is_host)
     }
 }
 
+const argtype *thunk_type_next_ptr(const argtype *type_ptr);
+
+static inline const argtype *thunk_type_next(const argtype *type_ptr)
+{
+    int type;
+
+    type = *type_ptr++;
+    switch(type) {
+    case TYPE_CHAR:
+    case TYPE_SHORT:
+    case TYPE_INT:
+    case TYPE_LONGLONG:
+    case TYPE_ULONGLONG:
+    case TYPE_LONG:
+    case TYPE_ULONG:
+    case TYPE_PTRVOID:
+    case TYPE_OLDDEVT:
+        return type_ptr;
+    case TYPE_PTR:
+        return thunk_type_next_ptr(type_ptr);
+    case TYPE_ARRAY:
+        return thunk_type_next_ptr(type_ptr + 1);
+    case TYPE_STRUCT:
+        return type_ptr + 1;
+    default:
+        return NULL;
+    }
+}
+
 static inline int thunk_type_align(const argtype *type_ptr, int is_host)
 {
     int type;

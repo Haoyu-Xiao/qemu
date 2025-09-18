@@ -20,18 +20,73 @@
 
 
 #ifndef NO_EMU_HOOKS
-typedef struct DevFileOps {
-    // File operations
-    int (*llseek) (unsigned int fd, unsigned long offset_high, unsigned long offset_low, loff_t *result,
-                   unsigned int whence);
-	ssize_t (*read) (unsigned int fd, char * buf, size_t count);
-	ssize_t (*write) (unsigned int fd, char * buf, size_t count);
-    int (*ioctl) (int fd, unsigned long request, void *arg);
-} DevFileOps;
+// typedef struct DevFileOps {
+//     // File operations
+//     int (*llseek) (unsigned int fd, unsigned long offset_high, unsigned long offset_low, loff_t *result,
+//                    unsigned int whence);
+// 	ssize_t (*read) (unsigned int fd, char * buf, size_t count);
+// 	ssize_t (*write) (unsigned int fd, char * buf, size_t count);
+//     int (*ioctl) (int fd, unsigned long request, void *arg);
+// } DevFileOps;
 
-typedef struct DevInfo {
-    DevFileOps ops;
-} DevInfo;
+typedef struct TargetFdDevInfo {
+    bool valid;
+    bool is_vdev;
+} TargetFdDevInfo;
+
+extern TargetFdDevInfo *target_fd_dev_info;
+extern QemuMutex target_fd_dev_info_lock;
+
+extern unsigned int target_fd_dev_info_max;
+
+static inline void fd_dev_info_init(void)
+{
+    qemu_mutex_init(&target_fd_dev_info_lock);
+}
+
+static inline TargetFdDevInfo * fd_dev_info_register(int fd)
+{
+    if (fd < 0) {
+        return NULL;
+    }
+
+    QEMU_LOCK_GUARD(&target_fd_dev_info_lock);
+
+    unsigned int oldmax;
+
+    if (fd >= target_fd_dev_info_max) {
+        oldmax = target_fd_dev_info_max;
+        target_fd_dev_info_max = ((fd >> 6) + 1) << 6; /* by slice of 64 entries */
+        target_fd_dev_info = g_renew(TargetFdDevInfo,
+                                  target_fd_dev_info, target_fd_dev_info_max);
+        memset((void *)(target_fd_dev_info + oldmax), 0,
+               (target_fd_dev_info_max - oldmax) * sizeof(TargetFdDevInfo));
+    }
+    return &target_fd_dev_info[fd];
+}
+
+static inline void fd_dev_info_unregister(int fd)
+{
+    if (fd < 0) {
+        return;
+    }
+
+    QEMU_LOCK_GUARD(&target_fd_dev_info_lock);
+
+    if (fd >= 0 && fd < target_fd_dev_info_max) {
+        target_fd_dev_info[fd].valid = false;
+    }
+}
+
+static inline void fd_dev_info_dup(int oldfd, int newfd)
+{
+    // assume oldfd != newfd && newfd < target_fd_max
+    QEMU_LOCK_GUARD(&target_fd_dev_info_lock);
+    if (oldfd < target_fd_dev_info_max) {
+        memcpy(&target_fd_dev_info[newfd], &target_fd_dev_info[oldfd], sizeof(TargetFdDevInfo));
+    }
+}
+
 #endif // !NO_EMU_HOOKS
 
 typedef abi_long (*TargetFdDataFunc)(void *, size_t);
@@ -40,9 +95,6 @@ typedef struct TargetFdTrans {
     TargetFdDataFunc host_to_target_data;
     TargetFdDataFunc target_to_host_data;
     TargetFdAddrFunc target_to_host_addr;
-#ifndef NO_EMU_HOOKS
-    DevInfo *dev_info;
-#endif // !NO_EMU_HOOKS
 } TargetFdTrans;
 
 extern TargetFdTrans **target_fd_trans;
@@ -103,21 +155,6 @@ static inline TargetFdAddrFunc fd_trans_target_to_host_addr(int fd)
     }
     return NULL;
 }
-
-#ifndef NO_EMU_HOOKS
-static inline DevInfo * fd_trans_dev_info(int fd)
-{
-    if (fd < 0) {
-        return NULL;
-    }
-
-    QEMU_LOCK_GUARD(&target_fd_trans_lock);
-    if (fd < target_fd_max && target_fd_trans[fd]) {
-        return target_fd_trans[fd]->dev_info;
-    }
-    return NULL;
-}
-#endif // !NO_EMU_HOOKS
 
 static inline void internal_fd_trans_register_unsafe(int fd,
                                                      TargetFdTrans *trans)

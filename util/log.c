@@ -132,6 +132,9 @@ static FILE *qemu_log_trylock_with_err(Error **errp)
 
     // Make sure logs are saved into correponding log file
     if (prev_thread_id && prev_thread_id != log_thread_id()) {
+        if (thread_file) {
+            fclose(thread_file);
+        }
         thread_file = NULL;
     }
 

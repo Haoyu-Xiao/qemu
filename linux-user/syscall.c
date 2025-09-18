@@ -143,6 +143,7 @@
 #include "qemu/selfmap.h"
 #ifndef NO_EMU_HOOKS
 #include "qemu/log.h"
+#include "user/ioctl-compat.h"
 #endif
 #include "user/syscall-trace.h"
 #include "special-errno.h"
@@ -269,15 +270,6 @@ static type name (type1 arg1,type2 arg2,type3 arg3,type4 arg4,type5 arg5,	\
 {										\
 	return syscall(__NR_##name, arg1, arg2, arg3, arg4, arg5, arg6);	\
 }
-
-#ifndef NO_EMU_HOOKS
-#define TARGET_NR_nvram_nonce   0x300
-#define TARGET_NR_nvram_get     0x301
-#define TARGET_NR_nvram_read    0x302
-#define TARGET_NR_nvram_set     0x303
-#define TARGET_NR_nvram_search  0x304
-#define TARGET_NR_nvram_replace 0x305
-#endif
 
 #define __NR_sys_uname __NR_uname
 #define __NR_sys_getcwd1 __NR_getcwd
@@ -645,7 +637,12 @@ int copy_struct_from_user(void *dst, size_t ksize, abi_ptr src, size_t usize)
 }
 
 #ifndef NO_EMU_HOOKS
-static void parse_ghpath(const char* pathname, char* redirected_path) {
+
+// static void init_fd_dev_info(int fd) {
+//     TargetFdDevInfo *info = fd_dev_info_register(fd);
+// }
+
+static void parse_ghpath(const char* pathname, char* redirected_path, int create) {
     char* result;
     char rpath[PATH_MAX - 2];
 
@@ -659,6 +656,17 @@ static void parse_ghpath(const char* pathname, char* redirected_path) {
 
         if (strncmp(rpath, "/proc/", 6) == 0) {
             snprintf(redirected_path, PATH_MAX, "/proc0/%s", rpath+6);
+            if (create) {
+                // make sure the directory exists
+                char dirpath[PATH_MAX];
+                snprintf(dirpath, PATH_MAX, "%s", redirected_path);
+                char *p = strrchr(dirpath, '/');
+                if (p) {
+                    *p = 0;
+                    mkdir(dirpath, 0755); // ignore error
+                }
+                return;
+            }
             if (access(redirected_path, F_OK) == 0) {
                 return;
             }
@@ -5817,66 +5825,77 @@ IOCTLEntry ioctl_entries[] = {
 
 #ifndef NO_EMU_HOOKS
 
-// Assume host is x64
-#define HOST_IOC_NRBITS       8
-#define HOST_IOC_TYPEBITS     8
-#define HOST_IOC_SIZEBITS     14
-#define HOST_IOC_DIRBITS      2
+/* Cooperate with FUSE filesystem to be compatible with special ioctl cmd */
+static abi_long do_ioctl_compat(int fd, int cmd, abi_long arg) {
+    abi_long ret;
+    int buf_size;
+    int target_size;
+    ioctl_arg_info_t info;
+    void *argptr = NULL;
+    uint8_t *buf_temp = NULL;
+    int trans_cmd = ioctl_cmd_trans(cmd);
 
-#define HOST_IOC_NRMASK       ((1 << HOST_IOC_NRBITS)-1)
-#define HOST_IOC_TYPEMASK     ((1 << HOST_IOC_TYPEBITS)-1)
-#define HOST_IOC_SIZEMASK     ((1 << HOST_IOC_SIZEBITS)-1)
-#define HOST_IOC_DIRMASK      ((1 << HOST_IOC_DIRBITS)-1)
+    ret = get_errno(safe_ioctl(fd, trans_cmd, arg));
+    if (ret == -EINCOMPAT) {
+        // fprintf(stderr, "[qemu] ioctl cmd 0x%lx return EINCOMPAT\n", (long)trans_cmd);
+        // Retrieve ioctl translation format
+        info.cmd = trans_cmd;
+        ret = get_errno(safe_ioctl(fd, IOCTL_ARG_INFO, &info));
+        if (is_error(ret)) {
+            // fprintf(stderr, "[qemu] ioctl IOCTL_ARG_INFO failed\n");
+            return -TARGET_ENOSYS;
+        }
+        // Translate data
+        buf_size = ioctl_data_type_size(info.arg_types, THUNK_HOST);
+        buf_temp = g_malloc(buf_size);
+        
+        target_size = ioctl_data_type_size(info.arg_types, THUNK_TARGET);
+        argptr = lock_user(VERIFY_READ, arg, target_size, 0);
+        if (!argptr) {
+            fprintf(stderr, "[qemu] ptr lock failed\n");
+            goto failed;
+        }
 
-#define HOST_IOC_NRSHIFT      0
-#define HOST_IOC_TYPESHIFT    (HOST_IOC_NRSHIFT+HOST_IOC_NRBITS)
-#define HOST_IOC_SIZESHIFT    (HOST_IOC_TYPESHIFT+HOST_IOC_TYPEBITS)
-#define HOST_IOC_DIRSHIFT     (HOST_IOC_SIZESHIFT+HOST_IOC_SIZEBITS)
+        ioctl_data_convert(buf_temp, argptr, info.arg_types, THUNK_HOST);
+        unlock_user(argptr, arg, 0);
+        argptr = NULL;
 
-#define HOST_IOC_NONE   0U
-#define HOST_IOC_WRITE  1U
-#define HOST_IOC_READ   2U
+        ret = get_errno(safe_ioctl(fd, info.cmd, buf_temp));
+        if (is_error(ret)) {
+            // fprintf(stderr, "[qemu] ioctl compatible call 0x%x failed\n", info.cmd);
+            goto failed;
+        }
+        // fprintf(stderr, "[qemu] ioctl compatible call write succeeded\n");
 
-// Mainly convert size and direction bits to target format
-static inline int ioctl_cmd_trans(int cmd) {
-#if defined(TARGET_I386) || defined(TARGET_ARM) || defined(TARGET_SH4)  \
-    || defined(TARGET_M68K) || defined(TARGET_CRIS)                     \
-    || defined(TARGET_S390X) || defined(TARGET_OPENRISC)                \
-    || defined(TARGET_RISCV)                                            \
-    || defined(TARGET_XTENSA) || defined(TARGET_LOONGARCH64) \
-    || defined(TARGET_HEXAGON)
-    return cmd;
-#elif defined(TARGET_PPC) || defined(TARGET_ALPHA) ||           \
-    defined(TARGET_SPARC) || defined(TARGET_MICROBLAZE) ||      \
-    defined(TARGET_MIPS) || defined(TARGET_HPPA)
-    int dir = (cmd >> TARGET_IOC_DIRSHIFT) & TARGET_IOC_DIRMASK;
-    switch (dir) {
-    case TARGET_IOC_NONE:
-        dir = HOST_IOC_NONE;
-        break;
-    case TARGET_IOC_READ:
-        dir = HOST_IOC_READ;
-        break;
-    case TARGET_IOC_WRITE:
-        dir = HOST_IOC_WRITE;
-        break;
-    default:
-        dir = HOST_IOC_NONE;
-        // fprintf(stderr, "Unsupported ioctl direction: cmd=0x%04lx, dir=%d\n",
-        //                 (long)cmd, dir);
-        // qemu_log_mask(LOG_UNIMP, "Unsupported ioctl direction: cmd=0x%04lx\n",
-                    //   (long)cmd);
-        return cmd;
+        if (host_ioc_dir(info.cmd) & HOST_IOC_READ) {
+            // fprintf(stderr, "[qemu] ioctl compatible call read started\n");
+            argptr = lock_user(VERIFY_WRITE, arg, target_size, 1);
+            if (!argptr) {
+                // fprintf(stderr, "[qemu] ptr lock failed\n");
+                goto failed;
+            }
+            if (!ioctl_data_convert(argptr, buf_temp, info.arg_types, THUNK_TARGET)) {
+                // fprintf(stderr, "[qemu] ioctl compatible call read failed\n");
+                goto failed;
+            }
+            // fprintf(stderr, "[qemu] ioctl compatible call read succeeded\n");
+        }
     }
-    int new_cmd = (cmd & ((1 << TARGET_IOC_SIZESHIFT) - 1)) | \
-        ((((cmd >> TARGET_IOC_SIZESHIFT) & TARGET_IOC_SIZEMASK & HOST_IOC_SIZEMASK) << HOST_IOC_SIZESHIFT)) | \
-        (dir << HOST_IOC_DIRSHIFT);
-    // fprintf(stderr, "ioctl cmd %x -> %x\n", cmd, new_cmd);
-    return new_cmd;
-#endif
+
+exit:
+    if (argptr) {
+        unlock_user(argptr, arg, 0);
+    }
+    if (buf_temp) {
+        g_free(buf_temp);
+    }
+    return ret;
+failed:
+    ret = -TARGET_EFAULT;
+    goto exit;
 }
 
-#endif // !NO_EMU_HOOKS
+#endif
 
 /* ??? Implement proper locking for ioctls.  */
 /* do_ioctl() Must return target values and target errnos. */
@@ -5893,7 +5912,7 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
     for(;;) {
         if (ie->target_cmd == 0) {
 #ifndef NO_EMU_HOOKS
-            return get_errno(safe_ioctl(fd, ioctl_cmd_trans(cmd), arg));
+            return do_ioctl_compat(fd, cmd, arg);
 #else
             qemu_log_mask(
                 LOG_UNIMP, "Unsupported ioctl: cmd=0x%04lx\n", (long)cmd);
@@ -5904,6 +5923,7 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
             break;
         ie++;
     }
+    // fprintf(stderr, "[qemu] ioctl ie %s (0x%lx) called\n", ie->name, (long)cmd);
     arg_type = ie->arg_type;
     if (ie->do_ioctl) {
         return ie->do_ioctl(ie, buf_temp, fd, cmd, arg);
@@ -9940,18 +9960,21 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (arg2 == 0 && arg3 == 0) {
             return get_errno(safe_read(arg1, 0, 0));
         } else {
-#ifndef NO_EMU_HOOKS
-            // Write to hackread device
-            if (hacksyscall_fd(read) > 0 && arg3 <= 0x100) {
-                if (!(p = lock_user(VERIFY_READ, arg2, arg3, 0)))
-                    return -TARGET_EFAULT;
-                ret = get_errno(safe_write(hacksyscall_fd(read), p, arg3));
-                unlock_user(p, arg2, ret);
-            }
-#endif
             if (!(p = lock_user(VERIFY_WRITE, arg2, arg3, 0)))
                 return -TARGET_EFAULT;
             ret = get_errno(safe_read(arg1, p, arg3));
+#ifndef NO_EMU_HOOKS
+            // Write to hackread device
+            if (ret == -EINCOMPAT) {
+                if (!hacksyscall_fd(read)) {
+                    hacksyscall_fd(read) = open(hacksyscall_path(read), O_WRONLY);
+                }
+                if (hacksyscall_fd(read) > 0) {
+                    safe_write(hacksyscall_fd(read), p, arg3);
+                }
+                ret = get_errno(safe_read(arg1, p, arg3));
+            }
+#endif
             if (ret >= 0 &&
                 fd_trans_host_to_target_data(arg1)) {
                 ret = fd_trans_host_to_target_data(arg1)(p, ret);
@@ -9986,7 +10009,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path);
+        parse_ghpath(p, redirected_path, arg2 & TARGET_O_CREAT);
         p = redirected_path;
 #endif
         ret = get_errno(do_guest_openat(cpu_env, AT_FDCWD, p,
@@ -10000,7 +10023,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (!(p = lock_user_string(arg2)))
             return -TARGET_EFAULT;
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path);
+        parse_ghpath(p, redirected_path, arg2 & TARGET_O_CREAT);
         p = redirected_path;
 #endif
         ret = get_errno(do_guest_openat(cpu_env, arg1, p,
@@ -10059,6 +10082,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             fprintf(stderr, "[qemu] not closing %d\n", (int)arg1);
             return 0;
         }
+        // fd_dev_info_unregister(arg1);
 #endif // NO_EMU_HOOKS
         fd_trans_unregister(arg1);
         return get_errno(close(arg1));
@@ -10069,7 +10093,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         int log_fd = qemu_log_fd();
         if (log_fd >= 0) {
             if (arg1 <= log_fd && arg2 >= log_fd) {
-                fprintf(stderr, "[qemu] not closing %d\n", (int)log_fd);
+                // fprintf(stderr, "[qemu] not closing %d\n", (int)log_fd);
                 if (arg1 == arg2) {
                     return 0;
                 } else if (arg1 == log_fd) {
@@ -10095,6 +10119,9 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             maxfd = MIN(arg2, target_fd_max);
             for (fd = arg1; fd < maxfd; fd++) {
                 fd_trans_unregister(fd);
+#ifndef NO_EMU_HOOKS
+                // fd_dev_info_unregister(fd);
+#endif // NO_EMU_HOOKS
             }
         }
         return ret;
@@ -10473,7 +10500,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path);
+        parse_ghpath(p, redirected_path, 0);
         p = redirected_path;
 #endif
         ret = get_errno(access(path(p), arg2));
@@ -10486,7 +10513,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path);
+        parse_ghpath(p, redirected_path, 0);
         p = redirected_path;
 #endif
         ret = get_errno(faccessat(arg1, p, arg3, 0));
@@ -10499,7 +10526,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path);
+        parse_ghpath(p, redirected_path, 0);
         p = redirected_path;
 #endif
         ret = get_errno(faccessat(arg1, p, arg3, arg4));
@@ -10576,6 +10603,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
     case TARGET_NR_mkdir:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
+#ifndef NO_EMU_HOOKS
+        parse_ghpath(p, redirected_path, 1);
+        p = redirected_path;
+#endif
         ret = get_errno(mkdir(p, arg2));
         unlock_user(p, arg1, 0);
         return ret;
@@ -10584,6 +10615,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
     case TARGET_NR_mkdirat:
         if (!(p = lock_user_string(arg2)))
             return -TARGET_EFAULT;
+#ifndef NO_EMU_HOOKS
+        parse_ghpath(p, redirected_path, 1);
+        p = redirected_path;
+#endif
         ret = get_errno(mkdirat(arg1, p, arg3));
         unlock_user(p, arg2, 0);
         return ret;
@@ -10592,6 +10627,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
     case TARGET_NR_rmdir:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
+#ifndef NO_EMU_HOOKS
+        parse_ghpath(p, redirected_path, 0);
+        p = redirected_path;
+#endif
         ret = get_errno(rmdir(p));
         unlock_user(p, arg1, 0);
         return ret;
@@ -10599,6 +10638,9 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
     case TARGET_NR_dup:
         ret = get_errno(dup(arg1));
         if (ret >= 0) {
+#ifndef NO_EMU_HOOKS
+            // fd_dev_info_dup(arg1, ret);
+#endif // NO_EMU_HOOKS
             fd_trans_dup(arg1, ret);
         }
         return ret;
@@ -11744,7 +11786,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path);
+        parse_ghpath(p, redirected_path, 0);
         p = redirected_path;
 #endif
         ret = get_errno(stat(path(p), &st));
@@ -11757,7 +11799,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path);
+        parse_ghpath(p, redirected_path, 0);
         p = redirected_path;
 #endif
         ret = get_errno(lstat(path(p), &st));
@@ -12626,7 +12668,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path);
+        parse_ghpath(p, redirected_path, 0);
         p = redirected_path;
 #endif
         ret = get_errno(stat(path(p), &st));
@@ -12641,7 +12683,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path);
+        parse_ghpath(p, redirected_path, 0);
         p = redirected_path;
 #endif
         ret = get_errno(lstat(path(p), &st));
@@ -12668,7 +12710,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path);
+        parse_ghpath(p, redirected_path, 0);
         p = redirected_path;
 #endif
         ret = get_errno(fstatat(arg1, path(p), &st, arg4));

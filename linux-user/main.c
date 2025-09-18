@@ -145,30 +145,11 @@ static void handle_arg_hackwrite(const char *arg)
         token = strtok(NULL, ",");
     }
 }
-
-#define register_hacksyscall(name) do { \
-    hacksyscall_fd(name) = open(hacksyscall_path(name), O_WRONLY); \
-} while (0)
-static void handle_arg_hacksyscall(const char *arg)
-{
-    if (!strcmp(arg, "read")) {
-        register_hacksyscall(read);
-    } else if (!strcmp(arg, "write")) {
-        register_hacksyscall(write);
-    } else if (!strcmp(arg, "open")) {
-        register_hacksyscall(open);
-    } else if (!strcmp(arg, "ioctl")) {
-        register_hacksyscall(ioctl);
-    } else {
-        fprintf(stderr, "Unsupported hacksyscall operation: %s\n", arg);
-        exit(EXIT_FAILURE);
-    }
-}
-#endif
+#endif // !NO_EMU_HOOKS
 
 /*
  * Used to implement backwards-compatibility for the `-strace`, and
- * QEMU_STRACE options. Without this, the QEMU_LOG can be overwritten by
+ * QEMU_STRACE `options. Without this, the QEMU_LOG can be overwritten by
  * -strace, or vice versa.
  */
 static bool enable_strace;
@@ -633,8 +614,6 @@ static const struct qemu_argument arg_table[] = {
      "",           "use hack of housefuzz"},
     {"hackwrite",  "QEMU_HACKWRITE",   true,    handle_arg_hackwrite, // HOUSEFUZZ PATCH
      "",           "dump output of given fd to log file"},
-    {"hacksyscall","QEMU_HACKSYSCALL", true,   handle_arg_hacksyscall, // HOUSEFUZZ PATCH
-     "",           "dump syscall information to /dev/hacksyscall/*"},
 #endif
     {NULL, NULL, false, NULL, NULL, NULL}
 };
@@ -1073,6 +1052,9 @@ int main(int argc, char **argv, char **envp)
     task_settid(ts);
 
     fd_trans_init();
+#ifndef NO_EMU_HOOKS
+    // fd_dev_info_init();
+#endif
 
     ret = loader_exec(execfd, exec_path, target_argv, target_environ,
                       info, &bprm);
