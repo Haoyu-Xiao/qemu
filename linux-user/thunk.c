@@ -27,7 +27,36 @@
 static unsigned int max_struct_entries;
 StructEntry *struct_entries;
 
-const argtype *thunk_type_next_ptr(const argtype *type_ptr)
+static const argtype *thunk_type_next_ptr(const argtype *type_ptr);
+
+static inline const argtype *thunk_type_next(const argtype *type_ptr)
+{
+    int type;
+
+    type = *type_ptr++;
+    switch(type) {
+    case TYPE_CHAR:
+    case TYPE_SHORT:
+    case TYPE_INT:
+    case TYPE_LONGLONG:
+    case TYPE_ULONGLONG:
+    case TYPE_LONG:
+    case TYPE_ULONG:
+    case TYPE_PTRVOID:
+    case TYPE_OLDDEVT:
+        return type_ptr;
+    case TYPE_PTR:
+        return thunk_type_next_ptr(type_ptr);
+    case TYPE_ARRAY:
+        return thunk_type_next_ptr(type_ptr + 1);
+    case TYPE_STRUCT:
+        return type_ptr + 1;
+    default:
+        return NULL;
+    }
+}
+
+static const argtype *thunk_type_next_ptr(const argtype *type_ptr)
 {
     return thunk_type_next(type_ptr);
 }
@@ -381,6 +410,7 @@ const argtype *thunk_print(void *arg, const argtype *type_ptr)
                 thunk_print(a, type_ptr);
                 a += arg_size;
             }
+
 #endif // !NO_EMU_HOOKS
             if (is_string) {
                 qemu_log("\"");
