@@ -34,10 +34,9 @@ extern char *qemu_execve_path; // GREENHOUSE_PATCH
 extern bool hackbind; // GREENHOUSE_PATCH
 extern bool hackproc; // GREENHOUSE_PATCH
 extern bool hacksysinfo; // GREENHOUSE_PATCH
-extern bool hackhouse; // HOUSEFUZZ PATCH
-#define MAX_HACKWRITE_FDS 0x20 // HOUSEFUZZ PATCH
-extern int hackwrite_fd_count; // HOUSEFUZZ PATCH
-extern int hackwrite_fds[MAX_HACKWRITE_FDS]; // HOUSEFUZZ PATCH
+#define MAX_HACKWRITE_FDS 0x20
+extern int hackwrite_fd_count;
+extern int hackwrite_fds[MAX_HACKWRITE_FDS];
 
 #define MAX_HACKSYSCALL_FDS 0x20
 extern int hacksyscall_fds[MAX_HACKSYSCALL_FDS];

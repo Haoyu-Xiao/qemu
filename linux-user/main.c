@@ -73,7 +73,11 @@ char real_exec_path[PATH_MAX];
 static bool opt_one_insn_per_tb;
 static unsigned long opt_tb_size;
 static const char *argv0;
+#ifndef NO_EMU_HOOKS
+static char *gdbstub;
+#else
 static const char *gdbstub;
+#endif
 static envlist_t *envlist;
 static const char *cpu_model;
 static const char *cpu_type;
@@ -87,10 +91,10 @@ bool program_code_only = false;
 bool hackbind = false; // GREENHOUSE PATCH
 bool hackproc = false; // GREENHOUSE PATCH
 bool hacksysinfo = false; // GREENHOUSE PATCH
-bool hackhouse = false; // HOUSEFUZZ PATCH
 int hackwrite_fd_count = 0; // HOUSEFUZZ PATCH
 int hackwrite_fds[MAX_HACKWRITE_FDS] = {0}; // HOUSEFUZZ PATCH
 int hacksyscall_fds[MAX_HACKSYSCALL_FDS] = {0};
+static const char *gdb_target = NULL;
 
 char *qemu_execve_path;
 
@@ -120,11 +124,6 @@ static void handle_arg_hacksysinfo(const char *arg)
     hacksysinfo = true;
 }
 
-static void handle_arg_hackhouse(const char *arg)
-{
-    hacksysinfo = true;
-}
-
 static void handle_arg_hackwrite(const char *arg)
 {
     char * args = strdup(arg);
@@ -144,6 +143,11 @@ static void handle_arg_hackwrite(const char *arg)
         hackwrite_fds[hackwrite_fd_count++] = fd;
         token = strtok(NULL, ",");
     }
+}
+
+static void handle_arg_gdb_target(const char *arg)
+{
+    gdb_target = strdup(arg);
 }
 #endif // !NO_EMU_HOOKS
 
@@ -610,10 +614,10 @@ static const struct qemu_argument arg_table[] = {
      "",           "use hack to get around needing to mount a writable /proc"},
     {"hacksysinfo","QEMU_HACKSYSINFO", false,   handle_arg_hacksysinfo, // GREENHOUSE PATCH
      "",           "use hack to get around sysinfo reporting"},
-    {"hackhouse",  "QEMU_HACKHOUSE",   false,   handle_arg_hackhouse, // HOUSEFUZZ PATCH
-     "",           "use hack of housefuzz"},
     {"hackwrite",  "QEMU_HACKWRITE",   true,    handle_arg_hackwrite, // HOUSEFUZZ PATCH
-     "",           "dump output of given fd to log file"},
+     "fd",         "dump output of given fd to log file"},
+    {"gdb-target", "QEMU_GDB_TARGET",  true,   handle_arg_gdb_target,
+     "name",       "only debug process with 'name'"},
 #endif
     {NULL, NULL, false, NULL, NULL, NULL}
 };
@@ -1052,9 +1056,6 @@ int main(int argc, char **argv, char **envp)
     task_settid(ts);
 
     fd_trans_init();
-#ifndef NO_EMU_HOOKS
-    // fd_dev_info_init();
-#endif
 
     ret = loader_exec(execfd, exec_path, target_argv, target_environ,
                       info, &bprm);
@@ -1121,6 +1122,14 @@ int main(int argc, char **argv, char **envp)
 
     init_main_thread(cpu, info);
 
+#ifndef NO_EMU_HOOKS
+    if (gdb_target) {
+        if (strstr(exec_path, gdb_target) == NULL) {
+            g_free(gdbstub);
+            gdbstub = NULL;
+        }
+    }
+#endif
     if (gdbstub) {
         gdbserver_start(gdbstub, &error_fatal);
     }

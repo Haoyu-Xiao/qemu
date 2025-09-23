@@ -51,11 +51,15 @@
 
 #define host_ioc_dir(cmd)   (((cmd) >> HOST_IOC_DIRSHIFT) & (HOST_IOC_WRITE | HOST_IOC_READ))
 
+static inline bool ioctl_cmd_may_conflict(int cmd) {
+    return !(cmd & (~HOST_IOC_NRMASK));
+}
+
 // Mainly convert size and direction bits to target format
 static inline int ioctl_cmd_trans(int cmd) {
 
     // Hack: Translate easily conflict ioctl command
-    if (!(cmd & (~HOST_IOC_NRMASK))) {
+    if (ioctl_cmd_may_conflict(cmd)) {
         return cmd | (0xff << HOST_IOC_TYPESHIFT);
     }
 
@@ -108,7 +112,9 @@ typedef struct ioctl_arg_info_t {
     uint32_t arg_types[IOCTL_ARG_INFO_TY_MAX];
 } ioctl_arg_info_t;
 
+#define IOCTL_LOG_MAX_SIZE 0x200
 #define IOCTL_ARG_INFO HOST_IOC(0xFE, 'i', sizeof(ioctl_arg_info_t), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_REQ_LOG HOST_IOC(0xFD, 'i', IOCTL_LOG_MAX_SIZE, HOST_IOC_READ)
 
 const argtype *ioctl_data_type_next(const argtype *type_ptr);
 
