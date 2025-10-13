@@ -37,15 +37,7 @@ extern bool hacksysinfo; // GREENHOUSE_PATCH
 #define MAX_HACKWRITE_FDS 0x20
 extern int hackwrite_fd_count;
 extern int hackwrite_fds[MAX_HACKWRITE_FDS];
-
-#define MAX_HACKSYSCALL_FDS 0x20
-extern int hacksyscall_fds[MAX_HACKSYSCALL_FDS];
-#define hacksyscall_fd(name) hacksyscall_fds[(HACKSYSCALL_INDEX_ ## name)]
-#define hacksyscall_path(name) ("/dev/hacksyscall_" #name)
-#define HACKSYSCALL_INDEX_read  0
-#define HACKSYSCALL_INDEX_write 1
-#define HACKSYSCALL_INDEX_open  2
-#define HACKSYSCALL_INDEX_ioctl 3
+extern char **hack_environ;
 #endif
 
 typedef struct IOCTLEntry IOCTLEntry;

@@ -93,8 +93,8 @@ bool hackproc = false; // GREENHOUSE PATCH
 bool hacksysinfo = false; // GREENHOUSE PATCH
 int hackwrite_fd_count = 0; // HOUSEFUZZ PATCH
 int hackwrite_fds[MAX_HACKWRITE_FDS] = {0}; // HOUSEFUZZ PATCH
-int hacksyscall_fds[MAX_HACKSYSCALL_FDS] = {0};
 static const char *gdb_target = NULL;
+char **hack_environ = NULL;
 
 char *qemu_execve_path;
 
@@ -997,6 +997,20 @@ int main(int argc, char **argv, char **envp)
 
     target_environ = envlist_to_environ(envlist, NULL);
     envlist_free(envlist);
+
+#ifndef NO_EMU_HOOKS
+    envlist = envlist_create();
+    for (wrk = environ; *wrk != NULL; wrk++) {
+        continue;
+    }
+    while (wrk != environ) {
+        wrk--;
+        if (strncmp(*wrk, "QEMU_", 5) == 0) {
+            (void) envlist_setenv(envlist, *wrk);
+        }
+    }
+    hack_environ = envlist_to_environ(envlist, NULL);
+#endif
 
     /*
      * Read in mmap_min_addr kernel parameter.  This value is used

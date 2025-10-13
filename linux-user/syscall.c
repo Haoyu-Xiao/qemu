@@ -718,6 +718,7 @@ static void dump_write(abi_long fd, const char *buf, abi_long size) {
                 snprintf(encode_buf + 2 * j, 3, "%02x", (unsigned char)buf[j]);
             }
             qemu_log_mask(LOG_STRACE, "|%d,%s", (int)fd, encode_buf);
+            free(encode_buf);
             return;
         }
     }
@@ -5858,40 +5859,58 @@ IOCTLEntry ioctl_entries[] = {
 
 static inline void ioctl_compat_log(int fd) {
     if (unlikely(qemu_loglevel_mask(LOG_STRACE))) {
-        char log_buf[IOCTL_LOG_MAX_SIZE];
-        abi_long ret = safe_ioctl(fd, IOCTL_REQ_LOG, &log_buf);
-        if (!is_error(ret)) {
-            qemu_log_mask(LOG_STRACE, "cl:%s\n", log_buf);
-            return;
+        char buf[IOCTL_COMPAT_LOG_MAX_SIZE];
+        abi_long ret = safe_ioctl(fd, IOCTL_COMPAT_LOG, &buf);
+        if (!is_error(ret) && ret > 0) {
+            int size = ret;
+            char *encode_buf = malloc(10 + 2 * size + 1);
+            for (abi_long j = 0; j < size; j++) {
+                snprintf(encode_buf + 2 * j, 3, "%02x", (unsigned char)buf[j]);
+            }
+            qemu_log_mask(LOG_STRACE, "|c,%s", encode_buf);
+            free(encode_buf);
         }
     }
 }
 
+static inline void ioctl_compat_flush(int fd) {
+    compat_flush_info_t info;
+    abi_long ret;
+
+    ret = safe_ioctl(fd, IOCTL_COMPAT_FLUSH, &info);
+    if (!is_error(ret)) {
+        char *buf = g_malloc0(info.size);
+        lseek(fd, info.offset, SEEK_SET);
+        safe_write(fd, buf, info.size);
+        g_free(buf);
+    }
+}
+
 /* Cooperate with FUSE filesystem to be compatible with special ioctl cmd */
-static abi_long do_ioctl_compat(int fd, int cmd, abi_long arg) {
+static abi_long do_compat_ioctl_internal(int fd, int cmd, abi_long arg, int size) {
     abi_long ret;
     int buf_size;
     int target_size;
-    ioctl_arg_info_t info;
+    compat_ioctl_info_t info;
     void *argptr = NULL;
     uint8_t *buf_temp = NULL;
-    int trans_cmd = ioctl_cmd_trans(cmd);
 
-    ret = get_errno(safe_ioctl(fd, trans_cmd, arg));
-    if (ret == -EINCOMPAT) {
-        // fprintf(stderr, "[qemu] ioctl cmd 0x%lx return EINCOMPAT\n", (long)trans_cmd);
-        // Retrieve ioctl translation format
-        info.cmd = trans_cmd;
-        ret = get_errno(safe_ioctl(fd, IOCTL_ARG_INFO, &info));
-        if (is_error(ret)) {
-            // fprintf(stderr, "[qemu] ioctl IOCTL_ARG_INFO failed\n");
-            return -TARGET_ENOSYS;
-        }
-        // Translate data
+    // Retrieve ioctl translation format
+    info.cmd = cmd;
+    info.size = size;
+    info.flags = 0;
+    
+    // Translate data
+    ret = get_errno(safe_ioctl(fd, IOCTL_COMPAT_IOCTL, &info));
+    if (is_error(ret)) {
+        // fprintf(stderr, "[qemu] ioctl IOCTL_COMPAT_IOCTL failed\n");
+        return -TARGET_ENOSYS;
+    }
+    if (info.flags & COMPAT_FLAG_CONVERT) {
         buf_size = ioctl_data_type_size(info.arg_types, THUNK_HOST);
         buf_temp = g_malloc(buf_size);
-        
         target_size = ioctl_data_type_size(info.arg_types, THUNK_TARGET);
+    
         argptr = lock_user(VERIFY_READ, arg, target_size, 0);
         if (!argptr) {
             fprintf(stderr, "[qemu] ptr lock failed\n");
@@ -5901,30 +5920,44 @@ static abi_long do_ioctl_compat(int fd, int cmd, abi_long arg) {
         ioctl_data_convert(buf_temp, argptr, info.arg_types, THUNK_HOST);
         unlock_user(argptr, arg, 0);
         argptr = NULL;
-
         ret = get_errno(safe_ioctl(fd, info.cmd, buf_temp));
-        if (is_error(ret)) {
-            // fprintf(stderr, "[qemu] ioctl compatible call 0x%x failed\n", info.cmd);
-            goto failed;
-        }
-        ioctl_compat_log(fd);
-        // fprintf(stderr, "[qemu] ioctl compatible call write succeeded\n");
 
         if (host_ioc_dir(info.cmd) & HOST_IOC_READ) {
-            // fprintf(stderr, "[qemu] ioctl compatible call read started\n");
             argptr = lock_user(VERIFY_WRITE, arg, target_size, 1);
             if (!argptr) {
-                // fprintf(stderr, "[qemu] ptr lock failed\n");
                 goto failed;
             }
             if (!ioctl_data_convert(argptr, buf_temp, info.arg_types, THUNK_TARGET)) {
-                // fprintf(stderr, "[qemu] ioctl compatible call read failed\n");
                 goto failed;
             }
-            // fprintf(stderr, "[qemu] ioctl compatible call read succeeded\n");
         }
+    } else {
+        target_size = ioctl_data_type_size(info.arg_types, THUNK_TARGET);
+        if (host_ioc_dir(info.cmd) & HOST_IOC_WRITE) {
+            buf_temp = lock_user(VERIFY_WRITE, arg, target_size, 1);
+        } else {
+            buf_temp = lock_user(VERIFY_READ, arg, target_size, 1);
+        }
+        ret = get_errno(safe_ioctl(fd, info.cmd, buf_temp));
+        if (host_ioc_dir(info.cmd) & HOST_IOC_WRITE) {
+            unlock_user(buf_temp, arg, target_size);
+        } else {
+            unlock_user(buf_temp, arg, 0);
+        }
+        buf_temp = NULL;
     }
 
+    if (is_error(ret)) {
+        goto failed;
+    }
+
+    if (info.flags & COMPAT_FLAG_FLUSH) {
+        ioctl_compat_flush(fd);
+    }
+
+    if (info.flags & COMPAT_FLAG_LOG) {
+        ioctl_compat_log(fd);
+    }
 exit:
     if (argptr) {
         unlock_user(argptr, arg, 0);
@@ -5938,6 +5971,26 @@ failed:
     goto exit;
 }
 
+static inline abi_long do_compat_read(abi_long arg1, abi_long arg2, abi_long arg3) {
+    return do_compat_ioctl_internal(arg1, IOCTL_COMPAT_READ, arg2, arg3);
+}
+
+static inline abi_long do_compat_write(abi_long arg1, abi_long arg2, abi_long arg3) {
+    return do_compat_ioctl_internal(arg1, IOCTL_COMPAT_WRITE, arg2, arg3);
+}
+
+/* Cooperate with FUSE filesystem to be compatible with special ioctl cmd */
+static abi_long do_compat_ioctl(int fd, int cmd, abi_long arg) {
+    abi_long ret;
+    int trans_cmd = ioctl_cmd_trans(cmd);
+
+    ret = get_errno(safe_ioctl(fd, trans_cmd, arg));
+    if (ret == -EINCOMPAT) {
+        return do_compat_ioctl_internal(fd, trans_cmd, arg, 0);
+    }
+
+    return ret;
+}
 #endif
 
 /* ??? Implement proper locking for ioctls.  */
@@ -5956,7 +6009,7 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
         // HACK: always pass through FIBMAP, FIGETBSZ for compatibility with some nvram
         if (ie->target_cmd == 0 || ioctl_cmd_may_conflict(cmd)) {
 #ifndef NO_EMU_HOOKS
-            return do_ioctl_compat(fd, cmd, arg);
+            return do_compat_ioctl(fd, cmd, arg);
 #else
             qemu_log_mask(
                 LOG_UNIMP, "Unsupported ioctl: cmd=0x%04lx\n", (long)cmd);
@@ -9230,6 +9283,14 @@ static int do_execv(CPUArchState *cpu_env, int dirfd,
         }
         envc++;
     }
+#ifndef NO_EMU_HOOKS
+    bool need_hack_environ = !!hack_environ;
+    if (hack_environ) {
+        for (q = hack_environ; *q; ++q) {
+            envc++;
+        }
+    }
+#endif
 
     argp = g_new0(char *, argc + 1);
     envp = g_new0(char *, envc + 1);
@@ -9259,7 +9320,20 @@ static int do_execv(CPUArchState *cpu_env, int dirfd,
         if (!*q) {
             goto execve_efault;
         }
+#ifndef NO_EMU_HOOKS
+        if (strncmp(*q, "QEMU_", 5) == 0) {
+            need_hack_environ = false;
+        }
+#endif
     }
+#ifndef NO_EMU_HOOKS
+    if (need_hack_environ) {
+        for (char **qq = hack_environ; *qq; ++qq) {
+            *q = *qq;
+            q++;
+        }
+    }
+#endif
     *q = NULL;
 
     /*
@@ -10007,26 +10081,16 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             if (!(p = lock_user(VERIFY_WRITE, arg2, arg3, 0)))
                 return -TARGET_EFAULT;
             ret = get_errno(safe_read(arg1, p, arg3));
-#ifndef NO_EMU_HOOKS
-            // Write to hackread device
-            if (ret == -EINCOMPAT) {
-                if (!hacksyscall_fd(read)) {
-                    hacksyscall_fd(read) = open(hacksyscall_path(read), O_WRONLY);
-                }
-                if (hacksyscall_fd(read) > 0) {
-                    safe_write(hacksyscall_fd(read), p, arg3);
-                }
-                ret = get_errno(safe_read(arg1, p, arg3));
-                if (ret >= 0) {
-                    ioctl_compat_log(arg1);
-                }
-            }
-#endif
             if (ret >= 0 &&
                 fd_trans_host_to_target_data(arg1)) {
                 ret = fd_trans_host_to_target_data(arg1)(p, ret);
             }
             unlock_user(p, arg2, ret);
+#ifndef NO_EMU_HOOKS
+            if (ret == -EINCOMPAT) {
+                ret = do_compat_read(arg1, arg2, arg3);
+            }
+#endif
         }
         return ret;
     case TARGET_NR_write:
@@ -10041,14 +10105,23 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             ret = fd_trans_target_to_host_data(arg1)(copy, arg3);
             if (ret >= 0) {
                 ret = get_errno(safe_write(arg1, copy, ret));
+#ifndef NO_EMU_HOOKS
                 dump_write(arg1, copy, ret);
+#endif
             }
             g_free(copy);
         } else {
             ret = get_errno(safe_write(arg1, p, arg3));
+#ifndef NO_EMU_HOOKS
             dump_write(arg1, p, arg3);
+#endif
         }
         unlock_user(p, arg2, 0);
+#ifndef NO_EMU_HOOKS
+        if (ret == -EINCOMPAT) {
+            ret = do_compat_write(arg1, arg2, arg3);
+        }
+#endif
         return ret;
 
 #ifdef TARGET_NR_open

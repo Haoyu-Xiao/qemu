@@ -105,16 +105,32 @@ static inline int ioctl_cmd_trans(int cmd) {
 
 #define EINCOMPAT 250 /* Incompatible ioctl for device */
 #define TARGET_EINCOMPAT 250
-#define IOCTL_ARG_INFO_TY_MAX 32
+#define COMPAT_IOCTL_ARG_TY_MAX 32
+#define COMPAT_RDWR_DATA_MAX 512
 
-typedef struct ioctl_arg_info_t {
+#define COMPAT_FLAG_CONVERT 0x1
+#define COMPAT_FLAG_LOG 0x2
+#define COMPAT_FLAG_FLUSH 0x4
+
+typedef struct compat_ioctl_info_t {
     uint32_t cmd; // original/translated cmd; 
-    uint32_t arg_types[IOCTL_ARG_INFO_TY_MAX];
-} ioctl_arg_info_t;
+    uint32_t size; // arg data size
+    uint32_t flags;
+    uint32_t arg_types[COMPAT_IOCTL_ARG_TY_MAX];
+} compat_ioctl_info_t;
 
-#define IOCTL_LOG_MAX_SIZE 0x200
-#define IOCTL_ARG_INFO HOST_IOC(0xFE, 'i', sizeof(ioctl_arg_info_t), HOST_IOC_READ | HOST_IOC_WRITE)
-#define IOCTL_REQ_LOG HOST_IOC(0xFD, 'i', IOCTL_LOG_MAX_SIZE, HOST_IOC_READ)
+typedef struct compat_flush_info_t {
+    uint32_t size; // size of data
+    uint32_t offset; // offset of data to read
+} compat_flush_info_t;
+
+#define IOCTL_COMPAT_LOG_MAX_SIZE 0x200
+
+#define IOCTL_COMPAT_IOCTL HOST_IOC(0xE0, 'i', sizeof(compat_ioctl_info_t), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_COMPAT_READ HOST_IOC(0xE1, 'i', 0, HOST_IOC_NONE)
+#define IOCTL_COMPAT_WRITE HOST_IOC(0xE2, 'i', 0, HOST_IOC_NONE)
+#define IOCTL_COMPAT_LOG HOST_IOC(0xF0, 'i', IOCTL_COMPAT_LOG_MAX_SIZE, HOST_IOC_READ)
+#define IOCTL_COMPAT_FLUSH HOST_IOC(0xF1, 'i', sizeof(compat_flush_info_t), HOST_IOC_READ)
 
 const argtype *ioctl_data_type_next(const argtype *type_ptr);
 
