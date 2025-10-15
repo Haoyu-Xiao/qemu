@@ -674,14 +674,12 @@ static int mkdir_p(const char *path, mode_t mode) {
     return 0;
 }
 
-static void parse_ghpath(const char* pathname, char* redirected_path, int create) {
-    char* result;
+static void *house_path_translate(char* pathname, char* redirected_path, int create) {
     char rpath[PATH_MAX - 2];
 
     if (hackproc) {
         memset(rpath, 0, sizeof(rpath));
-        result = realpath(pathname, rpath);
-        if (result == NULL) {
+        if (NULL == realpath(pathname, rpath)) {
             memset(rpath, 0, sizeof(rpath));
             snprintf(rpath, sizeof(rpath)-1, "%s", pathname);
         }
@@ -696,18 +694,19 @@ static void parse_ghpath(const char* pathname, char* redirected_path, int create
                     mkdir_p(redirected_path, 0755); // ignore error
                     *p = '/';
                 }
-                return;
+                return redirected_path;
             }
             if (access(redirected_path, F_OK) == 0) {
-                return;
+                return redirected_path;
+            }
+        } else if (strncmp(rpath, "/dev/", 5) == 0) {
+            snprintf(redirected_path, PATH_MAX, "/dev0/%s", rpath+5);
+            if (access(redirected_path, F_OK) == 0) {
+                return redirected_path;
             }
         }
-        // else if (strncmp(rpath, "/dev/", 5) == 0) {
-        //     snprintf(redirected_path, PATH_MAX, "/ghdev/%s", rpath+5);
-        //     return;
-        // }
     }
-    snprintf(redirected_path, PATH_MAX, "%s", pathname);
+    return pathname;
 }
 
 static void dump_write(abi_long fd, const char *buf, abi_long size) {
@@ -3344,6 +3343,23 @@ static abi_long do_socket(int domain, int type, int protocol)
             }
         }
     }
+#if 0
+#ifndef NO_EMU_HOOKS
+    else if (ret == -EACCESS || ret == -EAFNOSUPPORT | ret == -EINVAL || ret == -EPROTONOSUPPORT) {
+        // SOCK_RAW, SOCK_RDM, and SOCK_PACKET not supported in AF_UNIX.
+        // HACK: force to SOCK_DGRAM
+        switch (type) {
+        case SOCK_RAW:
+        case SOCK_RDM:
+        case SOCK_PACKET:
+            type = SOCK_DGRAM;
+            break;
+        }
+        // Create a shadow UNIX socket
+        ret = get_errno(socket(AF_UNIX, type, 0));
+    }
+#endif
+#endif
     return ret;
 }
 
@@ -10020,7 +10036,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
     || defined(TARGET_NR_fstatfs)
     struct statfs stfs;
 #endif
-    void *p;
+    void *p, *p0;
 #ifndef NO_EMU_HOOKS
     char redirected_path[PATH_MAX+1];
     memset(redirected_path, 0, sizeof(redirected_path));
@@ -10129,13 +10145,16 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path, arg2 & (TARGET_O_CREAT | TARGET_O_WRONLY));
-        p = redirected_path;
+        p0 = p;
+        p = house_path_translate(p, redirected_path, arg2 & (TARGET_O_CREAT | TARGET_O_WRONLY));
 #endif
         ret = get_errno(do_guest_openat(cpu_env, AT_FDCWD, p,
                                   target_to_host_bitmask(arg2, fcntl_flags_tbl),
                                   arg3, true));
         fd_trans_unregister(ret);
+#ifndef NO_EMU_HOOKS
+        p = p0;
+#endif
         unlock_user(p, arg1, 0);
         return ret;
 #endif
@@ -10143,13 +10162,16 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (!(p = lock_user_string(arg2)))
             return -TARGET_EFAULT;
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path, arg2 & (TARGET_O_CREAT | TARGET_O_WRONLY));
-        p = redirected_path;
+        p0 = p;
+        p = house_path_translate(p, redirected_path, arg2 & (TARGET_O_CREAT | TARGET_O_WRONLY));
 #endif
         ret = get_errno(do_guest_openat(cpu_env, arg1, p,
                                   target_to_host_bitmask(arg3, fcntl_flags_tbl),
                                   arg4, true));
         fd_trans_unregister(ret);
+#ifndef NO_EMU_HOOKS
+        p = p0;
+#endif
         unlock_user(p, arg2, 0);
         return ret;
     case TARGET_NR_openat2:
@@ -10620,10 +10642,13 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path, 0);
-        p = redirected_path;
+        p0 = p;
+        p = house_path_translate(p, redirected_path, 0);
 #endif
         ret = get_errno(access(path(p), arg2));
+#ifndef NO_EMU_HOOKS
+        p = p0;
+#endif
         unlock_user(p, arg1, 0);
         return ret;
 #endif
@@ -10633,10 +10658,13 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path, 0);
-        p = redirected_path;
+        p0 = p;
+        p = house_path_translate(p, redirected_path, 0);
 #endif
         ret = get_errno(faccessat(arg1, p, arg3, 0));
+#ifndef NO_EMU_HOOKS
+        p = p0;
+#endif
         unlock_user(p, arg2, 0);
         return ret;
 #endif
@@ -10646,10 +10674,13 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path, 0);
-        p = redirected_path;
+        p0 = p;
+        p = house_path_translate(p, redirected_path, 0);
 #endif
         ret = get_errno(faccessat(arg1, p, arg3, arg4));
+#ifndef NO_EMU_HOOKS
+        p = p0;
+#endif
         unlock_user(p, arg2, 0);
         return ret;
 #endif
@@ -10724,10 +10755,13 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path, 1);
-        p = redirected_path;
+        p0 = p;
+        p = house_path_translate(p, redirected_path, 1);
 #endif
         ret = get_errno(mkdir(p, arg2));
+#ifndef NO_EMU_HOOKS
+        p = p0;
+#endif
         unlock_user(p, arg1, 0);
         return ret;
 #endif
@@ -10736,10 +10770,13 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (!(p = lock_user_string(arg2)))
             return -TARGET_EFAULT;
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path, 1);
-        p = redirected_path;
+        p0 = p;
+        p = house_path_translate(p, redirected_path, 1);
 #endif
         ret = get_errno(mkdirat(arg1, p, arg3));
+#ifndef NO_EMU_HOOKS
+        p = p0;
+#endif
         unlock_user(p, arg2, 0);
         return ret;
 #endif
@@ -10748,10 +10785,13 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path, 0);
-        p = redirected_path;
+        p0 = p;
+        p = house_path_translate(p, redirected_path, 0);
 #endif
         ret = get_errno(rmdir(p));
+#ifndef NO_EMU_HOOKS
+        p = p0;
+#endif
         unlock_user(p, arg1, 0);
         return ret;
 #endif
@@ -11906,10 +11946,13 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path, 0);
-        p = redirected_path;
+        p0 = p;
+        p = house_path_translate(p, redirected_path, 0);
 #endif
         ret = get_errno(stat(path(p), &st));
+#ifndef NO_EMU_HOOKS
+        p = p0;
+#endif
         unlock_user(p, arg1, 0);
         goto do_stat;
 #endif
@@ -11919,10 +11962,13 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path, 0);
-        p = redirected_path;
+        p0 = p;
+        p = house_path_translate(p, redirected_path, 0);
 #endif
         ret = get_errno(lstat(path(p), &st));
+#ifndef NO_EMU_HOOKS
+        p = p0;
+#endif
         unlock_user(p, arg1, 0);
         goto do_stat;
 #endif
@@ -12788,10 +12834,13 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path, 0);
-        p = redirected_path;
+        p0 = p;
+        p = house_path_translate(p, redirected_path, 0);
 #endif
         ret = get_errno(stat(path(p), &st));
+#ifndef NO_EMU_HOOKS
+        p = p0;
+#endif
         unlock_user(p, arg1, 0);
         if (!is_error(ret))
             ret = host_to_target_stat64(cpu_env, arg2, &st);
@@ -12803,10 +12852,13 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path, 0);
-        p = redirected_path;
+        p0 = p;
+        p = house_path_translate(p, redirected_path, 0);
 #endif
         ret = get_errno(lstat(path(p), &st));
+#ifndef NO_EMU_HOOKS
+        p = p0;
+#endif
         unlock_user(p, arg1, 0);
         if (!is_error(ret))
             ret = host_to_target_stat64(cpu_env, arg2, &st);
@@ -12830,10 +12882,13 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
 #ifndef NO_EMU_HOOKS
-        parse_ghpath(p, redirected_path, 0);
-        p = redirected_path;
+        p0 = p;
+        p = house_path_translate(p, redirected_path, 0);
 #endif
         ret = get_errno(fstatat(arg1, path(p), &st, arg4));
+#ifndef NO_EMU_HOOKS
+        p = p0;
+#endif
         unlock_user(p, arg2, 0);
         if (!is_error(ret))
             ret = host_to_target_stat64(cpu_env, arg3, &st);
