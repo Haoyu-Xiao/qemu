@@ -5860,17 +5860,6 @@ static abi_long do_ioctl_TUNSETTXFILTER(const IOCTLEntry *ie, uint8_t *buf_temp,
     return get_errno(safe_ioctl(fd, ie->host_cmd, filter));
 }
 
-IOCTLEntry ioctl_entries[] = {
-#define IOCTL(cmd, access, ...) \
-    { TARGET_ ## cmd, cmd, #cmd, access, 0, {  __VA_ARGS__ } },
-#define IOCTL_SPECIAL(cmd, access, dofn, ...)                      \
-    { TARGET_ ## cmd, cmd, #cmd, access, dofn, {  __VA_ARGS__ } },
-#define IOCTL_IGNORE(cmd) \
-    { TARGET_ ## cmd, 0, #cmd },
-#include "ioctls.h"
-    { 0, 0, },
-};
-
 #ifndef NO_EMU_HOOKS
 
 static inline void ioctl_compat_log(int fd) {
@@ -5922,6 +5911,7 @@ static abi_long do_compat_ioctl_internal(int fd, int cmd, abi_long arg, int size
         // fprintf(stderr, "[qemu] ioctl IOCTL_COMPAT_IOCTL failed\n");
         return -TARGET_ENOSYS;
     }
+    flock(fd, LOCK_EX); // TODO: shall I check return value?
     if (info.flags & COMPAT_FLAG_CONVERT) {
         buf_size = ioctl_data_type_size(info.arg_types, THUNK_HOST);
         buf_temp = g_malloc(buf_size);
@@ -5975,6 +5965,7 @@ static abi_long do_compat_ioctl_internal(int fd, int cmd, abi_long arg, int size
         ioctl_compat_log(fd);
     }
 exit:
+    flock(fd, LOCK_UN); // TODO: shall I check return value?
     if (argptr) {
         unlock_user(argptr, arg, 0);
     }
@@ -6007,7 +5998,23 @@ static abi_long do_compat_ioctl(int fd, int cmd, abi_long arg) {
 
     return ret;
 }
+
+static abi_long do_compat_ioctl_socket(const IOCTLEntry *ie, uint8_t *buf_temp,
+                                       int fd, int cmd, abi_long arg) {
+    return 0;
+}
 #endif
+
+IOCTLEntry ioctl_entries[] = {
+#define IOCTL(cmd, access, ...) \
+    { TARGET_ ## cmd, cmd, #cmd, access, 0, {  __VA_ARGS__ } },
+#define IOCTL_SPECIAL(cmd, access, dofn, ...)                      \
+    { TARGET_ ## cmd, cmd, #cmd, access, dofn, {  __VA_ARGS__ } },
+#define IOCTL_IGNORE(cmd) \
+    { TARGET_ ## cmd, 0, #cmd },
+#include "ioctls.h"
+    { 0, 0, },
+};
 
 /* ??? Implement proper locking for ioctls.  */
 /* do_ioctl() Must return target values and target errnos. */
