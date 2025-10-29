@@ -675,39 +675,38 @@ static int mkdir_p(const char *path, mode_t mode) {
 }
 
 static void *house_path_translate(char* pathname, char* redirected_path, int create) {
-    char rpath[PATH_MAX - 2];
+    char rpath[PATH_MAX];
 
-    if (hackproc) {
+    memset(rpath, 0, sizeof(rpath));
+    if (NULL == realpath(pathname, rpath)) {
         memset(rpath, 0, sizeof(rpath));
-        if (NULL == realpath(pathname, rpath)) {
-            memset(rpath, 0, sizeof(rpath));
-            snprintf(rpath, sizeof(rpath)-1, "%s", pathname);
-        }
+        snprintf(rpath, sizeof(rpath)-1, "%s", pathname);
+    }
 
-        if (strncmp(rpath, "/proc/", 6) == 0) {
-            snprintf(redirected_path, PATH_MAX, "/proc0/%s", rpath+6);
-            if (create) {
-                // make sure the directory exists
-                char *p = strrchr(redirected_path, '/');
-                if (p) {
-                    *p = 0;
-                    mkdir_p(redirected_path, 0755); // ignore error
-                    *p = '/';
-                }
-                return redirected_path;
+    if (strncmp(rpath, "/proc/", 6) == 0) {
+        snprintf(redirected_path, PATH_MAX + 2, "/proc0/%s", rpath+6);
+        if (create) {
+            // make sure the directory exists
+            char *p = strrchr(redirected_path, '/');
+            if (p) {
+                *p = 0;
+                mkdir_p(redirected_path, 0755); // ignore error
+                *p = '/';
             }
-            if (access(redirected_path, F_OK) == 0) {
-                return redirected_path;
-            }
-        } else if (strncmp(rpath, "/dev/", 5) == 0) {
-            snprintf(redirected_path, PATH_MAX, "/dev0/%s", rpath+5);
-            if (access(redirected_path, F_OK) == 0) {
-                return redirected_path;
-            }
+            return redirected_path;
+        }
+        if (access(redirected_path, F_OK) == 0) {
+            return redirected_path;
+        }
+    } else if (strncmp(rpath, "/dev/", 5) == 0) {
+        snprintf(redirected_path, PATH_MAX + 2, "/dev0/%s", rpath+5);
+        if (access(redirected_path, F_OK) == 0) {
+            return redirected_path;
         }
     }
     return pathname;
 }
+
 
 static void dump_write(abi_long fd, const char *buf, abi_long size) {
     for (int i = 0; i < hackwrite_fd_count; i++) {
@@ -10045,7 +10044,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
 #endif
     void *p, *p0;
 #ifndef NO_EMU_HOOKS
-    char redirected_path[PATH_MAX+1];
+    char redirected_path[PATH_MAX+3];
     memset(redirected_path, 0, sizeof(redirected_path));
 #endif
 
