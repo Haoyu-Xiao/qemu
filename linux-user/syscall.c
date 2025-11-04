@@ -5988,9 +5988,22 @@ static inline abi_long do_compat_write(abi_long arg1, abi_long arg2, abi_long ar
 /* Cooperate with FUSE filesystem to be compatible with special ioctl cmd */
 static abi_long do_compat_ioctl(int fd, int cmd, abi_long arg) {
     abi_long ret;
+    void *arg_buf;
+
     int trans_cmd = ioctl_cmd_trans(cmd);
 
-    ret = get_errno(safe_ioctl(fd, trans_cmd, arg));
+    int cmd_io_size = host_ioc_size(cmd);
+    arg_buf = lock_user(VERIFY_WRITE, arg, cmd_io_size, 1);
+    if (!arg_buf) {
+        arg_buf = lock_user(VERIFY_READ, arg, cmd_io_size, 1);
+    }
+
+    ret = get_errno(safe_ioctl(fd, trans_cmd, arg_buf));
+
+    if (arg_buf) {
+        unlock_user(arg_buf, arg, cmd_io_size);
+    }
+
     if (ret == -EINCOMPAT) {
         return do_compat_ioctl_internal(fd, trans_cmd, arg, 0);
     }
@@ -10226,7 +10239,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
     case TARGET_NR_close:
         // GREENHOUSE PATCH: disable closing for select files
 #ifndef NO_EMU_HOOKS
-        if (arg1 == qemu_log_fd()) {
+        if (arg1 >= 0 && arg1 == qemu_log_fd()) {
             fprintf(stderr, "[qemu] not closing %d\n", (int)arg1);
             return 0;
         }
@@ -10857,19 +10870,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         return ret;
 #endif
     case TARGET_NR_ioctl:
-#ifndef NO_EMU_HOOKS
-        ret = do_ioctl(arg1, arg2, arg3);
-        // Forcing ioctl return success code will reduce success rate of emulation,
-        // which means some 
-        // if (ret < 0) {
-        //     fprintf(stderr, "[qemu] Forcing ioctl(%ld, %ld, ...) = %d => 0\n",
-        //             (long int) arg1, (long int) arg2, (int)ret);
-        //     return 0;
-        // }
-        return ret;
-#else
         return do_ioctl(arg1, arg2, arg3);
-#endif
 #ifdef TARGET_NR_fcntl
     case TARGET_NR_fcntl:
         return do_fcntl(arg1, arg2, arg3);
