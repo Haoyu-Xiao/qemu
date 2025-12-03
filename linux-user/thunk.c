@@ -393,7 +393,7 @@ const argtype *thunk_print(void *arg, const argtype *type_ptr)
                     char c = *(char *)a;
                     if (c == '"' || c == '\\') {
                         qemu_log("\\");
-                    } else if ((c >= 0 && c < 32) || c >= 0x7f) {
+                    } else if ((c >= 0 && c < 32) || c >= 0x7f || c == '(' || c == ')' || c == '[' || c == ']') {
                         qemu_log("\\x%02x", (unsigned char)c);
                         a++;
                         continue;

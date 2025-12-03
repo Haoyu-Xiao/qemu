@@ -95,6 +95,7 @@ int hackwrite_fd_count = 0; // HOUSEFUZZ PATCH
 int hackwrite_fds[MAX_HACKWRITE_FDS] = {0}; // HOUSEFUZZ PATCH
 static const char *gdb_target = NULL;
 char **hack_environ = NULL;
+static bool no_trace = false;
 
 char *qemu_execve_path;
 
@@ -148,6 +149,15 @@ static void handle_arg_hackwrite(const char *arg)
 static void handle_arg_gdb_target(const char *arg)
 {
     gdb_target = strdup(arg);
+}
+
+static void handle_arg_log_max_tid(const char *arg)
+{
+    int tid_max = atoi(arg);
+    int tid = gettid();
+    if (tid > tid_max) {
+        no_trace = true;
+    }
 }
 #endif // !NO_EMU_HOOKS
 
@@ -618,6 +628,8 @@ static const struct qemu_argument arg_table[] = {
      "fd",         "dump output of given fd to log file"},
     {"gdb-target", "QEMU_GDB_TARGET",  true,   handle_arg_gdb_target,
      "name",       "only debug process with 'name'"},
+    {"log-max-tid","QEMU_LOG_MAX_TID", true,   handle_arg_log_max_tid,
+     "",           "enable logging of maximum thread IDs"},
 #endif
     {NULL, NULL, false, NULL, NULL, NULL}
 };
@@ -821,9 +833,15 @@ int main(int argc, char **argv, char **envp)
 
     optind = parse_args(argc, argv);
 
+#ifndef NO_EMU_HOOKS
+    qemu_set_log_filename_flags(last_log_filename,
+                                (last_log_mask | (enable_strace * LOG_STRACE)) * !no_trace,
+                                &error_fatal);
+#else
     qemu_set_log_filename_flags(last_log_filename,
                                 last_log_mask | (enable_strace * LOG_STRACE),
                                 &error_fatal);
+#endif
 
     if (!trace_init_backends()) {
         exit(1);

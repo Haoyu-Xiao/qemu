@@ -56,7 +56,7 @@ static inline bool ioctl_cmd_may_conflict(int cmd) {
     return !(cmd & (~HOST_IOC_NRMASK));
 }
 
-// Mainly convert size and direction bits to target format
+// Mainly convert size and direction bits to host format
 static inline int ioctl_cmd_trans(int cmd) {
 
     // Hack: Translate easily conflict ioctl command
@@ -97,7 +97,7 @@ static inline int ioctl_cmd_trans(int cmd) {
         return cmd;
     }
     int new_cmd = (cmd & ((1 << TARGET_IOC_SIZESHIFT) - 1)) | \
-        ((((cmd >> TARGET_IOC_SIZESHIFT) & TARGET_IOC_SIZEMASK) << HOST_IOC_SIZESHIFT) & HOST_IOC_SIZEMASK) | \
+        ((((cmd >> TARGET_IOC_SIZESHIFT) & TARGET_IOC_SIZEMASK) & HOST_IOC_SIZEMASK) << HOST_IOC_SIZESHIFT) | \
         (dir << HOST_IOC_DIRSHIFT);
     // fprintf(stderr, "ioctl cmd %x -> %x\n", cmd, new_cmd);
     return new_cmd;
@@ -127,6 +127,7 @@ typedef struct compat_flush_info_t {
 
 #define IOCTL_COMPAT_LOG_MAX_SIZE 0x200
 
+#define IOCTL_COMPAT_STAT HOST_IOC(0xD0, 'i', sizeof(struct stat), HOST_IOC_READ | HOST_IOC_WRITE)
 #define IOCTL_COMPAT_IOCTL HOST_IOC(0xE0, 'i', sizeof(compat_ioctl_info_t), HOST_IOC_READ | HOST_IOC_WRITE)
 #define IOCTL_COMPAT_READ HOST_IOC(0xE1, 'i', 0, HOST_IOC_NONE)
 #define IOCTL_COMPAT_WRITE HOST_IOC(0xE2, 'i', 0, HOST_IOC_NONE)

@@ -422,9 +422,11 @@ _syscall5(int, kcmp, pid_t, pid1, pid_t, pid2, int, type,
 /*
  * It is assumed that struct statx is architecture independent.
  */
+#ifdef NO_EMU_HOOKS
 #if defined(TARGET_NR_statx) && defined(__NR_statx)
 _syscall5(int, sys_statx, int, dirfd, const char *, pathname, int, flags,
           unsigned int, mask, struct target_statx *, statxbuf)
+#endif
 #endif
 #if defined(TARGET_NR_membarrier) && defined(__NR_membarrier)
 _syscall2(int, membarrier, int, cmd, int, flags)
@@ -683,8 +685,16 @@ static void *house_path_translate(char* pathname, char* redirected_path, int cre
         snprintf(rpath, sizeof(rpath)-1, "%s", pathname);
     }
 
-    if (strncmp(rpath, "/proc/", 6) == 0) {
-        snprintf(redirected_path, PATH_MAX + 2, "/proc0/%s", rpath+6);
+    bool is_proc = !strncmp(rpath, "/proc/", 6);
+    bool is_sys = !is_proc && !strncmp(rpath, "/sys/", 5);
+    bool is_dev = !is_proc && !is_sys && !strncmp(rpath, "/dev/", 5);
+    
+    if (is_proc || is_sys) {
+        if (is_proc) {
+            snprintf(redirected_path, PATH_MAX + 2, "/proc0/%s", rpath+6);
+        } else {
+            snprintf(redirected_path, PATH_MAX + 2, "/sys0/%s", rpath+5);
+        }
         if (create) {
             // make sure the directory exists
             char *p = strrchr(redirected_path, '/');
@@ -698,15 +708,18 @@ static void *house_path_translate(char* pathname, char* redirected_path, int cre
         if (access(redirected_path, F_OK) == 0) {
             return redirected_path;
         }
-    } else if (strncmp(rpath, "/dev/", 5) == 0) {
-        snprintf(redirected_path, PATH_MAX + 2, "/dev0/%s", rpath+5);
+    } else if (is_dev) {
+        if (strcmp(rpath, "/dev/console") == 0 && \
+            readlink("/proc/self/fd/0", redirected_path, PATH_MAX + 2) == 0) {
+        } else {
+            snprintf(redirected_path, PATH_MAX + 2, "/dev0/%s", rpath+5);
+        }
         if (access(redirected_path, F_OK) == 0) {
             return redirected_path;
         }
     }
     return pathname;
 }
-
 
 static void dump_write(abi_long fd, const char *buf, abi_long size) {
     for (int i = 0; i < hackwrite_fd_count; i++) {
@@ -5977,6 +5990,29 @@ failed:
     goto exit;
 }
 
+static inline abi_long do_compat_fstat(int fd, struct stat *st) {
+    return get_errno(safe_ioctl(fd, IOCTL_COMPAT_STAT, st));
+}
+
+static inline abi_long do_compat_fstatat(int dirfd, const char *path, struct stat *st) {
+    int fd = openat(dirfd, path, O_RDONLY);
+    if (fd < 0) {
+        return get_errno(fd);
+    }
+    return do_compat_fstat(fd, st);
+}
+
+static inline abi_long do_compat_stat(const char *path, struct stat *st) {
+    if (path && strncmp(path, "/dev", 4)) {
+        return 0; // No need to request for stat
+    }
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return get_errno(fd);
+    }
+    return do_compat_fstat(fd, st);
+}
+
 static inline abi_long do_compat_read(abi_long arg1, abi_long arg2, abi_long arg3) {
     return do_compat_ioctl_internal(arg1, IOCTL_COMPAT_READ, arg2, arg3);
 }
@@ -5993,14 +6029,22 @@ static abi_long do_compat_ioctl(int fd, int cmd, abi_long arg) {
     int trans_cmd = ioctl_cmd_trans(cmd);
 
     int cmd_io_size = host_ioc_size(cmd);
-    arg_buf = lock_user(VERIFY_WRITE, arg, cmd_io_size, 1);
-    if (!arg_buf) {
-        arg_buf = lock_user(VERIFY_READ, arg, cmd_io_size, 1);
+    if (cmd_io_size == 0) {
+        arg_buf = NULL;
+    } else {
+        arg_buf = lock_user(VERIFY_WRITE, arg, cmd_io_size, 1);
+        if (!arg_buf) {
+            arg_buf = lock_user(VERIFY_READ, arg, cmd_io_size, 1);
+        }
     }
 
-    ret = get_errno(safe_ioctl(fd, trans_cmd, arg_buf));
+    if (!arg_buf) {
+        ret = get_errno(safe_ioctl(fd, trans_cmd, arg));
+    } else {
+        ret = get_errno(safe_ioctl(fd, trans_cmd, arg_buf));
+    }
 
-    if (arg_buf) {
+    if (arg_buf && cmd_io_size) {
         unlock_user(arg_buf, arg, cmd_io_size);
     }
 
@@ -6055,6 +6099,11 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
             break;
         ie++;
     }
+#ifndef NO_EMU_HOOKS
+    if (!ie->do_ioctl) {
+        return do_compat_ioctl(fd, cmd, arg);
+    }
+#endif
     // fprintf(stderr, "[qemu] ioctl ie %s (0x%lx) called\n", ie->name, (long)cmd);
     arg_type = ie->arg_type;
     if (ie->do_ioctl) {
@@ -10055,7 +10104,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
     || defined(TARGET_NR_fstatfs)
     struct statfs stfs;
 #endif
-    void *p, *p0;
+    void *p, *p0, *p00;
 #ifndef NO_EMU_HOOKS
     char redirected_path[PATH_MAX+3];
     memset(redirected_path, 0, sizeof(redirected_path));
@@ -10469,7 +10518,6 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
                 }
                 return -TARGET_EFAULT;
             }
-
             if (arg3) {
                 p3 = lock_user_string(arg3);
                 if (!p3) {
@@ -10483,6 +10531,13 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
                 p3 = NULL;
             }
 
+#ifndef NO_EMU_HOOKS
+            // Translate mount source and target paths
+            p0 = p2;
+            p00 = p3;
+            p2 = house_path_translate(p2, redirected_path, 1);
+            p3 = house_path_translate(p3, redirected_path, 1);
+#endif
             /* FIXME - arg5 should be locked, but it isn't clear how to
              * do that since it's not guaranteed to be a NULL-terminated
              * string.
@@ -10493,6 +10548,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
                 ret = mount(p, p2, p3, (unsigned long)arg4, g2h(cpu, arg5));
             }
             ret = get_errno(ret);
+#ifndef NO_EMU_HOOKS
+            p2 = p0;
+            p3 = p00;
+#endif
 
             if (arg1) {
                 unlock_user(p, arg1, 0);
@@ -10512,6 +10571,11 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
 #endif
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
+#ifndef NO_EMU_HOOKS
+        if (!strncmp(p, "/dev/", 5) || !strncmp(p, "/proc/", 6)){
+            return -TARGET_EPERM;
+        }
+#endif
         ret = get_errno(umount(p));
         unlock_user(p, arg1, 0);
         return ret;
@@ -10865,6 +10929,11 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
     case TARGET_NR_umount2:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
+#ifndef NO_EMU_HOOKS
+        if (!strncmp(p, "/dev/", 5) || !strncmp(p, "/proc/", 6)){
+            return -TARGET_EPERM;
+        }
+#endif
         ret = get_errno(umount2(p, arg2));
         unlock_user(p, arg1, 0);
         return ret;
@@ -11484,10 +11553,17 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             void *p2;
             p = lock_user_string(arg1);
             p2 = lock_user_string(arg2);
+#ifndef NO_EMU_HOOKS
+            p0 = p2;
+            p2 = house_path_translate(p2, redirected_path, 0);
+#endif
             if (!p || !p2)
                 ret = -TARGET_EFAULT;
             else
                 ret = get_errno(symlink(p, p2));
+#ifndef NO_EMU_HOOKS
+            p2 = p0;
+#endif
             unlock_user(p2, arg2, 0);
             unlock_user(p, arg1, 0);
         }
@@ -11987,6 +12063,9 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         do_stat:
 #endif
             if (!is_error(ret)) {
+#ifndef NO_EMU_HOOKS
+                do_compat_fstat(arg1, &st);
+#endif
                 struct target_stat *target_st;
 
                 if (!lock_user_struct(VERIFY_WRITE, target_st, arg2, 0))
@@ -12849,8 +12928,12 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         p = p0;
 #endif
         unlock_user(p, arg1, 0);
-        if (!is_error(ret))
+        if (!is_error(ret)) {
+#ifndef NO_EMU_HOOKS
+            do_compat_stat(path(p), &st);
+#endif
             ret = host_to_target_stat64(cpu_env, arg2, &st);
+        }
         return ret;
 #endif
 #ifdef TARGET_NR_lstat64
@@ -12867,15 +12950,23 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         p = p0;
 #endif
         unlock_user(p, arg1, 0);
-        if (!is_error(ret))
+        if (!is_error(ret)) {
+#ifndef NO_EMU_HOOKS
+            do_compat_stat(path(p), &st);
+#endif
             ret = host_to_target_stat64(cpu_env, arg2, &st);
+        }
         return ret;
 #endif
 #ifdef TARGET_NR_fstat64
     case TARGET_NR_fstat64:
         ret = get_errno(fstat(arg1, &st));
-        if (!is_error(ret))
+        if (!is_error(ret)) {
+#ifndef NO_EMU_HOOKS
+            do_compat_fstat(arg1, &st);
+#endif
             ret = host_to_target_stat64(cpu_env, arg2, &st);
+        }
         return ret;
 #endif
 #if (defined(TARGET_NR_fstatat64) || defined(TARGET_NR_newfstatat))
@@ -12897,8 +12988,12 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         p = p0;
 #endif
         unlock_user(p, arg2, 0);
-        if (!is_error(ret))
+        if (!is_error(ret)) {
+#ifndef NO_EMU_HOOKS
+            do_compat_fstatat(arg1, path(p), &st);
+#endif
             ret = host_to_target_stat64(cpu_env, arg3, &st);
+        }
         return ret;
 #endif
 #if defined(TARGET_NR_statx)
@@ -12912,6 +13007,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             if (p == NULL) {
                 return -TARGET_EFAULT;
             }
+#ifdef NO_EMU_HOOKS // Not using statx
 #if defined(__NR_statx)
             {
                 /*
@@ -12934,10 +13030,14 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
                 }
             }
 #endif
+#endif
             ret = get_errno(fstatat(dirfd, path(p), &st, flags));
             unlock_user(p, arg2, 0);
 
             if (!is_error(ret)) {
+#ifndef NO_EMU_HOOKS
+                do_compat_stat(path(p), &st);
+#endif
                 if (!lock_user_struct(VERIFY_WRITE, target_stx, arg5, 0)) {
                     return -TARGET_EFAULT;
                 }
