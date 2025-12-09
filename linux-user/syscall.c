@@ -6083,7 +6083,7 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
         // HACK: always pass through FIBMAP, FIGETBSZ for compatibility with some nvram
         if (ie->target_cmd == 0 || ioctl_cmd_may_conflict(cmd)) {
 #ifndef NO_EMU_HOOKS
-            return do_compat_ioctl(fd, cmd, arg);
+            break;
 #else
             qemu_log_mask(
                 LOG_UNIMP, "Unsupported ioctl: cmd=0x%04lx\n", (long)cmd);
@@ -6095,7 +6095,7 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
         ie++;
     }
 #ifndef NO_EMU_HOOKS
-    if (!ie->do_ioctl) {
+    if (ie->target_cmd != cmd) {
         return do_compat_ioctl(fd, cmd, arg);
     }
 #endif
@@ -9431,14 +9431,6 @@ static int do_execv(CPUArchState *cpu_env, int dirfd,
         goto execve_efault;
     }
 
-#ifndef NO_EMU_HOOKS
-    char redirected_path[PATH_MAX+3];
-    void *p0;
-    memset(redirected_path, 0, sizeof(redirected_path));
-    p0 = p;
-    p = house_path_translate(p, redirected_path, 0);
-#endif
-
     const char *exe = p;
     if (is_proc_myself(p, "exe")) {
         exe = exec_path;
@@ -9454,7 +9446,7 @@ static int do_execv(CPUArchState *cpu_env, int dirfd,
             ? safe_execveat(dirfd, exe, argp, envp, flags)
             : safe_execve(exe, argp, envp);
     }
-    p = p0; // restore original pointer for unlock
+    // p = p0; // restore original pointer for unlock
 #else
     ret = is_execveat
         ? safe_execveat(dirfd, exe, argp, envp, flags)
@@ -10296,6 +10288,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             fprintf(stderr, "[qemu] not closing %d\n", (int)arg1);
             return 0;
         }
+        // if (arg1 == 0) {
+        //     // For compatible with symlink ttys which point to /proc/self/fd/0
+        //     return 0;
+        // }
         // fd_dev_info_unregister(arg1);
 #endif // NO_EMU_HOOKS
         fd_trans_unregister(arg1);
