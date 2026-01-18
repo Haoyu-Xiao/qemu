@@ -706,6 +706,8 @@ static void *house_path_translate(char* pathname, char* redirected_path, int cre
     } else if (is_dev) {
         if (strcmp(rpath, "/dev/console") == 0 && \
             readlink("/proc/self/fd/0", redirected_path, PATH_MAX + 2) == 0) {
+        } else if (access(pathname, F_OK) == 0) {
+            return pathname;
         } else {
             snprintf(redirected_path, PATH_MAX + 2, "/dev0/%s", rpath+5);
         }
@@ -8963,6 +8965,25 @@ static int is_proc_myself(const char *filename, const char *entry)
     return 0;
 }
 
+#ifndef NO_EMU_HOOKS
+static int is_proc_cmdline(const char *filename)
+{
+    if (!strncmp(filename, "/proc/", strlen("/proc/"))) {
+        filename += strlen("/proc/");
+        while (*filename) {
+            if (*filename == '/') {
+                if (!strncmp(filename, "/cmdline", strlen("/cmdline"))) {
+                    return 1;
+                }
+                break;
+            }
+            filename++;
+        }
+    }
+    return 0;
+}
+#endif
+
 static void excp_dump_file(FILE *logfile, CPUArchState *env,
                       const char *fmt, int code)
 {
@@ -9137,6 +9158,56 @@ static int maybe_do_fake_open(CPUArchState *cpu_env, int dirfd,
 
         return fd;
     }
+#ifndef NO_EMU_HOOKS
+    // Handle cmdline to remove qemu prefix
+    if (is_proc_cmdline(pathname)) {
+        const char *tmpdir;
+        char filename[PATH_MAX];
+        char buf[PATH_MAX * 2]; // TODO: fix size
+        int fd, r;
+
+        // copy cmdline removing qemu prefix
+        r = open(pathname, O_RDONLY);
+        if (r >= 0) {
+            ssize_t len = read(r, buf, sizeof(buf) - 1);
+            buf[len] = 0;
+            close(r);
+            // strip qemu prefix
+            if (len > 0 && strstr(buf, "/qemu-")) {
+                char *p = &buf[strlen(buf) + 1];
+                p += strlen(p) + 1;
+                if (*p) {
+                    fd = memfd_create("qemu-open", 0);
+                    if (fd < 0) {
+                        if (errno != ENOSYS) {
+                            return fd;
+                        }
+                        /* create temporary file to map stat to */
+                        tmpdir = getenv("TMPDIR");
+                        if (!tmpdir)
+                            tmpdir = "/tmp";
+                        snprintf(filename, sizeof(filename), "%s/qemu-open.XXXXXX", tmpdir);
+                        fd = mkstemp(filename);
+                        if (fd < 0) {
+                            return fd;
+                        }
+                        unlink(filename);
+                    }
+
+                    // write stripped cmdline
+                    ssize_t wlen = write(fd, p, len - (p - buf));
+                    if (wlen != len - (p - buf)) {
+                        close(fd);
+                        return -2;
+                    }
+                    lseek(fd, 0, SEEK_SET);
+
+                    return fd;
+                }
+            }
+        }
+    }
+#endif
 
     return -2;
 }
@@ -11961,7 +12032,11 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             case TARGET_SYSLOG_ACTION_CONSOLE_LEVEL: /* Set messages level */
             case TARGET_SYSLOG_ACTION_SIZE_UNREAD:   /* Number of chars */
             case TARGET_SYSLOG_ACTION_SIZE_BUFFER:   /* Size of the buffer */
+#ifndef NO_EMU_HOOKS
+                return 0;
+#else
                 return get_errno(sys_syslog((int)arg1, NULL, (int)arg3));
+#endif
             case TARGET_SYSLOG_ACTION_READ:          /* Read from log */
             case TARGET_SYSLOG_ACTION_READ_CLEAR:    /* Read/clear msgs */
             case TARGET_SYSLOG_ACTION_READ_ALL:      /* Read last messages */
