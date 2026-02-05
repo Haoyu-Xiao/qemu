@@ -9120,44 +9120,6 @@ static int maybe_do_fake_open(CPUArchState *cpu_env, int dirfd,
         }
     }
 
-    for (fake_open = fakes; fake_open->filename; fake_open++) {
-        if (fake_open->cmp(pathname, fake_open->filename)) {
-            break;
-        }
-    }
-
-    if (fake_open->filename) {
-        const char *tmpdir;
-        char filename[PATH_MAX];
-        int fd, r;
-
-        fd = memfd_create("qemu-open", 0);
-        if (fd < 0) {
-            if (errno != ENOSYS) {
-                return fd;
-            }
-            /* create temporary file to map stat to */
-            tmpdir = getenv("TMPDIR");
-            if (!tmpdir)
-                tmpdir = "/tmp";
-            snprintf(filename, sizeof(filename), "%s/qemu-open.XXXXXX", tmpdir);
-            fd = mkstemp(filename);
-            if (fd < 0) {
-                return fd;
-            }
-            unlink(filename);
-        }
-
-        if ((r = fake_open->fill(cpu_env, fd))) {
-            int e = errno;
-            close(fd);
-            errno = e;
-            return r;
-        }
-        lseek(fd, 0, SEEK_SET);
-
-        return fd;
-    }
 #ifndef NO_EMU_HOOKS
     // Handle cmdline to remove qemu prefix
     if (is_proc_cmdline(pathname)) {
@@ -9208,6 +9170,45 @@ static int maybe_do_fake_open(CPUArchState *cpu_env, int dirfd,
         }
     }
 #endif
+
+    for (fake_open = fakes; fake_open->filename; fake_open++) {
+        if (fake_open->cmp(pathname, fake_open->filename)) {
+            break;
+        }
+    }
+
+    if (fake_open->filename) {
+        const char *tmpdir;
+        char filename[PATH_MAX];
+        int fd, r;
+
+        fd = memfd_create("qemu-open", 0);
+        if (fd < 0) {
+            if (errno != ENOSYS) {
+                return fd;
+            }
+            /* create temporary file to map stat to */
+            tmpdir = getenv("TMPDIR");
+            if (!tmpdir)
+                tmpdir = "/tmp";
+            snprintf(filename, sizeof(filename), "%s/qemu-open.XXXXXX", tmpdir);
+            fd = mkstemp(filename);
+            if (fd < 0) {
+                return fd;
+            }
+            unlink(filename);
+        }
+
+        if ((r = fake_open->fill(cpu_env, fd))) {
+            int e = errno;
+            close(fd);
+            errno = e;
+            return r;
+        }
+        lseek(fd, 0, SEEK_SET);
+
+        return fd;
+    }
 
     return -2;
 }
