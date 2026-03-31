@@ -130,6 +130,7 @@ static FILE *qemu_log_trylock_with_err(Error **errp)
     int new_logfd;
 #endif
 
+#ifndef NO_EMU_HOOKS
     // Make sure logs are saved into correponding log file
     if (prev_thread_id && prev_thread_id != log_thread_id()) {
         if (thread_file) {
@@ -137,6 +138,7 @@ static FILE *qemu_log_trylock_with_err(Error **errp)
         }
         thread_file = NULL;
     }
+#endif
 
     logfile = thread_file;
     if (!logfile) {

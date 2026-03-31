@@ -640,10 +640,6 @@ int copy_struct_from_user(void *dst, size_t ksize, abi_ptr src, size_t usize)
 
 #ifndef NO_EMU_HOOKS
 
-// static void init_fd_dev_info(int fd) {
-//     TargetFdDevInfo *info = fd_dev_info_register(fd);
-// }
-
 static int mkdir_p(const char *path, mode_t mode) {
     char tmp[PATH_MAX];
     char *p = NULL;
@@ -999,6 +995,91 @@ abi_long do_brk(abi_ulong brk_val)
 
 #if defined(TARGET_NR_select) || defined(TARGET_NR__newselect) || \
     defined(TARGET_NR_pselect6) || defined(TARGET_NR_pselect6_time64)
+#ifndef NO_EMU_HOOKS
+static bool sockfs_fd_p(int fd);
+static int vsockfs_open_flags(int target_type);
+static int vsockfs_strip_socket_flags(int host_type);
+#else
+static inline bool sockfs_fd_p(int fd)
+{
+    (void)fd;
+    return false;
+}
+
+static inline abi_long do_vsockfs_setsockopt(int fd, int level, int optname,
+                                             abi_ulong optval_addr, socklen_t optlen)
+{
+    (void)fd; (void)level; (void)optname; (void)optval_addr; (void)optlen;
+    return -TARGET_ENOSYS;
+}
+
+static inline abi_long do_vsockfs_getsockopt(int fd, int level, int optname,
+                                             abi_ulong optval_addr, abi_ulong optlen_addr)
+{
+    (void)fd; (void)level; (void)optname; (void)optval_addr; (void)optlen_addr;
+    return -TARGET_ENOSYS;
+}
+
+static inline abi_long do_vsockfs_sockaddr_ioctl(int fd, int cmd, void *addr,
+                                                 socklen_t *addrlen, bool copy_back)
+{
+    (void)fd; (void)cmd; (void)addr; (void)addrlen; (void)copy_back;
+    return -TARGET_ENOSYS;
+}
+
+static inline abi_long do_vsockfs_listen(int fd, int backlog)
+{
+    (void)fd; (void)backlog;
+    return -TARGET_ENOSYS;
+}
+
+static inline abi_long do_vsockfs_shutdown(int fd, int how)
+{
+    (void)fd; (void)how;
+    return -TARGET_ENOSYS;
+}
+
+static inline abi_long do_vsockfs_sendto(int fd, const void *buf, size_t len, int flags,
+                                         void *addr, socklen_t addrlen)
+{
+    (void)fd; (void)buf; (void)len; (void)flags; (void)addr; (void)addrlen;
+    return -TARGET_ENOSYS;
+}
+
+static inline abi_long do_vsockfs_recvfrom(int fd, void *buf, size_t len, int flags,
+                                           void *addr, socklen_t *addrlen)
+{
+    (void)fd; (void)buf; (void)len; (void)flags; (void)addr; (void)addrlen;
+    return -TARGET_ENOSYS;
+}
+
+static inline abi_long do_vsockfs_sendmsg(int fd, const void *buf, size_t len, int flags,
+                                          void *addr, socklen_t addrlen,
+                                          const void *control, size_t controllen)
+{
+    (void)fd; (void)buf; (void)len; (void)flags; (void)addr; (void)addrlen;
+    (void)control; (void)controllen;
+    return -TARGET_ENOSYS;
+}
+
+static inline abi_long do_vsockfs_recvmsg(int fd, void *buf, size_t len, int flags,
+                                          void *addr, socklen_t *addrlen,
+                                          void *control, size_t *controllen,
+                                          int *msg_flags)
+{
+    (void)fd; (void)buf; (void)len; (void)flags; (void)addr; (void)addrlen;
+    (void)control; (void)controllen; (void)msg_flags;
+    return -TARGET_ENOSYS;
+}
+
+static inline abi_long do_vsockfs_accept4(int listener_fd, abi_ulong target_addr,
+                                          abi_ulong target_addrlen_addr, int flags)
+{
+    (void)listener_fd; (void)target_addr; (void)target_addrlen_addr; (void)flags;
+    return -TARGET_ENOSYS;
+}
+#endif
+
 static inline abi_long copy_from_user_fdset(fd_set *fds,
                                             abi_ulong target_fds_addr,
                                             int n)
@@ -2196,6 +2277,10 @@ static inline abi_long host_to_target_cmsg(struct target_msghdr *target_msgh,
 #ifndef NO_EMU_HOOKS
 static abi_long do_setsockopt_bak(int sockfd, int level, int optname,
                               abi_ulong optval_addr, socklen_t optlen);
+static abi_long do_vsockfs_setsockopt(int fd, int level, int optname,
+                                      abi_ulong optval_addr, socklen_t optlen);
+static abi_long do_vsockfs_getsockopt(int fd, int level, int optname,
+                                      abi_ulong optval_addr, abi_ulong optlen_addr);
 
 static abi_long do_setsockopt(int sockfd, int level, int optname,
                               abi_ulong optval_addr, socklen_t optlen) {
@@ -2217,6 +2302,12 @@ static abi_long do_setsockopt(int sockfd, int level, int optname,
 {
     abi_long ret;
     int val;
+
+#ifndef NO_EMU_HOOKS
+    if (sockfs_fd_p(sockfd)) {
+        return do_vsockfs_setsockopt(sockfd, level, optname, optval_addr, optlen);
+    }
+#endif
 
     switch(level) {
     case SOL_TCP:
@@ -2700,6 +2791,12 @@ static abi_long do_getsockopt(int sockfd, int level, int optname,
     abi_long ret;
     int len, val;
     socklen_t lv;
+
+#ifndef NO_EMU_HOOKS
+    if (sockfs_fd_p(sockfd)) {
+        return do_vsockfs_getsockopt(sockfd, level, optname, optval_addr, optlen);
+    }
+#endif
 
     switch(level) {
     case TARGET_SOL_SOCKET:
@@ -3293,11 +3390,912 @@ static int sock_flags_fixup(int fd, int target_type)
     return fd;
 }
 
+#ifndef NO_EMU_HOOKS
+#define VSOCKFS_DEV_PATH "/dev/sockfs"
+#define VSOCKFS_DEV_PATH_ENV "HOUSE_EMU_VSOCKFS_DEV_PATH"
+#define SOCKFS_PATH_MARKER "/sockfs/"
+#define VSOCKFS_SOCKADDR_MAX 128
+#define VSOCKFS_DGRAM_MAX 2048
+#define VSOCKFS_MSG_CONTROL_MAX 512
+#define VSOCKFS_SOCKOPT_MAX 128
+#define IOCTL_VSOCKFS_CREATE_SOCKET \
+    HOST_IOC(0x90, 's', sizeof(struct vsockfs_socket_create), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_VSOCKFS_BIND \
+    HOST_IOC(0x92, 's', sizeof(struct vsockfs_sockaddr), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_VSOCKFS_CONNECT \
+    HOST_IOC(0x93, 's', sizeof(struct vsockfs_sockaddr), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_VSOCKFS_GETSOCKNAME \
+    HOST_IOC(0x94, 's', sizeof(struct vsockfs_sockaddr), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_VSOCKFS_GETPEERNAME \
+    HOST_IOC(0x95, 's', sizeof(struct vsockfs_sockaddr), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_VSOCKFS_LISTEN \
+    HOST_IOC(0x96, 's', 0, 0)
+#define IOCTL_VSOCKFS_ACCEPT \
+    HOST_IOC(0x97, 's', sizeof(struct vsockfs_socket_accept), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_VSOCKFS_POLL_EVENTS \
+    HOST_IOC(0x98, 's', sizeof(struct vsockfs_poll_events), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_VSOCKFS_SETSOCKOPT \
+    HOST_IOC(0x99, 's', sizeof(struct vsockfs_sockopt), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_VSOCKFS_GETSOCKOPT \
+    HOST_IOC(0x9A, 's', sizeof(struct vsockfs_sockopt), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_VSOCKFS_SENDTO \
+    HOST_IOC(0x9B, 's', sizeof(struct vsockfs_sendto), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_VSOCKFS_RECVFROM \
+    HOST_IOC(0x9C, 's', sizeof(struct vsockfs_recvfrom), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_VSOCKFS_SHUTDOWN \
+    HOST_IOC(0x9D, 's', sizeof(struct vsockfs_shutdown), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_VSOCKFS_SENDMSG \
+    HOST_IOC(0x9E, 's', sizeof(struct vsockfs_sendmsg), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_VSOCKFS_RECVMSG \
+    HOST_IOC(0x9F, 's', sizeof(struct vsockfs_recvmsg), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_VSOCKFS_ATTACH_HOST \
+    HOST_IOC(0xA0, 's', sizeof(struct vsockfs_host_attach), HOST_IOC_READ | HOST_IOC_WRITE)
+
+#define VSOCKFS_SOCKET_CREATED 1
+#define VSOCKFS_SOCKET_BOUND 2
+#define VSOCKFS_SOCKET_CONNECTED 3
+#define VSOCKFS_SOCKET_CLOSED 4
+#define VSOCKFS_SOCKET_LISTENING 5
+
+struct vsockfs_socket_create {
+    int32_t domain;
+    int32_t ty;
+    int32_t protocol;
+};
+
+struct vsockfs_sockaddr {
+    uint32_t addrlen;
+    uint32_t reserved;
+    uint8_t addr[VSOCKFS_SOCKADDR_MAX];
+};
+
+struct vsockfs_socket_accept {
+    uint64_t listener_id;
+};
+
+struct vsockfs_host_attach {
+    int32_t qemu_pid;
+    int32_t carrier_fd;
+    uint32_t state;
+    uint32_t backlog;
+    uint32_t local_addrlen;
+    uint32_t peer_addrlen;
+    uint32_t flags;
+    uint32_t reserved;
+    uint8_t local_addr[VSOCKFS_SOCKADDR_MAX];
+    uint8_t peer_addr[VSOCKFS_SOCKADDR_MAX];
+};
+
+struct vsockfs_poll_events {
+    uint32_t requested;
+    uint32_t revents;
+};
+
+struct vsockfs_sendto {
+    int32_t flags;
+    uint32_t addrlen;
+    uint32_t datalen;
+    uint32_t reserved;
+    uint8_t addr[VSOCKFS_SOCKADDR_MAX];
+    uint8_t data[VSOCKFS_DGRAM_MAX];
+};
+
+struct vsockfs_recvfrom {
+    int32_t flags;
+    uint32_t buflen;
+    uint32_t out_len;
+    uint32_t addrlen;
+    uint32_t reserved;
+    uint8_t addr[VSOCKFS_SOCKADDR_MAX];
+    uint8_t data[VSOCKFS_DGRAM_MAX];
+};
+
+struct vsockfs_sendmsg {
+    int32_t flags;
+    uint32_t addrlen;
+    uint32_t datalen;
+    uint32_t controllen;
+    uint32_t reserved;
+    uint8_t addr[VSOCKFS_SOCKADDR_MAX];
+    uint8_t control[VSOCKFS_MSG_CONTROL_MAX];
+    uint8_t data[VSOCKFS_DGRAM_MAX];
+};
+
+struct vsockfs_recvmsg {
+    int32_t flags;
+    uint32_t buflen;
+    uint32_t controllen;
+    uint32_t out_len;
+    uint32_t out_controllen;
+    uint32_t addrlen;
+    int32_t msg_flags;
+    uint32_t reserved;
+    uint8_t addr[VSOCKFS_SOCKADDR_MAX];
+    uint8_t control[VSOCKFS_MSG_CONTROL_MAX];
+    uint8_t data[VSOCKFS_DGRAM_MAX];
+};
+
+struct vsockfs_sockopt {
+    int32_t level;
+    int32_t optname;
+    uint32_t optlen;
+    uint32_t reserved;
+    uint8_t data[VSOCKFS_SOCKOPT_MAX];
+};
+
+struct vsockfs_shutdown {
+    int32_t how;
+    uint32_t reserved;
+};
+
+static unsigned long sockfs_token_counter;
+
+static const char *vsockfs_dev_path(void)
+{
+    const char *override = getenv(VSOCKFS_DEV_PATH_ENV);
+
+    return (override && override[0] != '\0') ? override : VSOCKFS_DEV_PATH;
+}
+
+static bool sockfs_fd_target(int fd, char *target, size_t target_len)
+{
+    char proc_path[64];
+    ssize_t len;
+
+    if (fd < 0 || target_len == 0) {
+        return false;
+    }
+
+    snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", fd);
+    len = readlink(proc_path, target, target_len - 1);
+    if (len < 0) {
+        return false;
+    }
+
+    target[len] = '\0';
+    return true;
+}
+
+static bool sockfs_fd_p(int fd)
+{
+    char target[PATH_MAX];
+
+    return sockfs_fd_target(fd, target, sizeof(target)) &&
+           strstr(target, SOCKFS_PATH_MARKER) != NULL;
+}
+
+static void sockfs_capture_host_sockaddr(int host_fd,
+                                         int (*op)(int, struct sockaddr *, socklen_t *),
+                                         uint8_t *buf, uint32_t *buflen)
+{
+    struct sockaddr_storage storage;
+    socklen_t len = sizeof(storage);
+
+    *buflen = 0;
+    if (op(host_fd, (struct sockaddr *)&storage, &len) == 0 &&
+        len <= VSOCKFS_SOCKADDR_MAX) {
+        memcpy(buf, &storage, len);
+        *buflen = len;
+    }
+}
+
+static abi_long do_vsockfs_attach_host_state(int fd, int host_fd,
+                                             uint32_t state, uint32_t backlog)
+{
+    struct vsockfs_host_attach req = { 0 };
+
+    req.qemu_pid = getpid();
+    req.carrier_fd = host_fd;
+    req.state = state;
+    req.backlog = backlog;
+    sockfs_capture_host_sockaddr(host_fd, getsockname, req.local_addr, &req.local_addrlen);
+    sockfs_capture_host_sockaddr(host_fd, getpeername, req.peer_addr, &req.peer_addrlen);
+
+    return get_errno(safe_ioctl(fd, IOCTL_VSOCKFS_ATTACH_HOST, &req));
+}
+
+static void sockfs_next_token(char *token, size_t token_len, const char *prefix)
+{
+    unsigned long seq = qatomic_fetch_inc(&sockfs_token_counter);
+
+    snprintf(token, token_len, "%s-%d-%lu", prefix, getpid(), seq);
+}
+
+static bool sockfs_extract_open_token(const char *target, char *token, size_t token_len)
+{
+    const char *start;
+    const char *end;
+    size_t len;
+
+    start = strstr(target, "/sockfs/open/");
+    if (!start) {
+        return false;
+    }
+    start += strlen("/sockfs/open/");
+    end = strchr(start, '/');
+    if (!end) {
+        return false;
+    }
+    len = end - start;
+    if (len == 0 || len >= token_len) {
+        return false;
+    }
+
+    memcpy(token, start, len);
+    token[len] = '\0';
+    return true;
+}
+
+static abi_long sockfs_open_path(const char *sockfs_path, int target_type)
+{
+    int fd = open(path(sockfs_path), vsockfs_open_flags(target_type));
+    if (fd < 0) {
+        return get_errno(fd);
+    }
+    return sock_flags_fixup(fd, target_type);
+}
+
+static abi_long sockfs_open_socket(int domain, int type, int protocol, int target_type)
+{
+    char token[64];
+    char *sockfs_path;
+    abi_long ret;
+
+    sockfs_next_token(token, sizeof(token), "open");
+    sockfs_path = g_strdup_printf("%s/open/%s/af=%d/type=%d/proto=%d",
+                                  vsockfs_dev_path(), token, domain,
+                                  vsockfs_strip_socket_flags(type), protocol);
+    ret = sockfs_open_path(sockfs_path, target_type);
+    g_free(sockfs_path);
+    return ret;
+}
+
+static abi_long sockfs_open_accept(int listener_fd, int target_type)
+{
+    char listener_target[PATH_MAX];
+    char listener_token[128];
+    char accepted_token[128];
+    char *sockfs_path;
+    abi_long ret;
+
+    if (!sockfs_fd_target(listener_fd, listener_target, sizeof(listener_target)) ||
+        !sockfs_extract_open_token(listener_target, listener_token, sizeof(listener_token))) {
+        return -TARGET_EBADF;
+    }
+
+    sockfs_next_token(accepted_token, sizeof(accepted_token), "accept");
+    sockfs_path = g_strdup_printf("%s/accept/%s/%s",
+                                  vsockfs_dev_path(), listener_token, accepted_token);
+    ret = sockfs_open_path(sockfs_path, target_type);
+    g_free(sockfs_path);
+    return ret;
+}
+
+static abi_long sockfs_open_socketpair(int domain, int type, int protocol,
+                                       int target_type, abi_ulong target_tab_addr)
+{
+    char pair_token[64];
+    char *left_path;
+    char *right_path;
+    abi_long left_fd;
+    abi_long right_fd;
+
+    sockfs_next_token(pair_token, sizeof(pair_token), "socketpair");
+    left_path = g_strdup_printf("%s/socketpair/%s/left/af=%d/type=%d/proto=%d",
+                                vsockfs_dev_path(), pair_token, domain,
+                                vsockfs_strip_socket_flags(type), protocol);
+    right_path = g_strdup_printf("%s/socketpair/%s/right/af=%d/type=%d/proto=%d",
+                                 vsockfs_dev_path(), pair_token, domain,
+                                 vsockfs_strip_socket_flags(type), protocol);
+    left_fd = sockfs_open_path(left_path, target_type);
+    g_free(left_path);
+    if (is_error(left_fd)) {
+        g_free(right_path);
+        return left_fd;
+    }
+
+    right_fd = sockfs_open_path(right_path, target_type);
+    g_free(right_path);
+    if (is_error(right_fd)) {
+        close(left_fd);
+        return right_fd;
+    }
+
+    if (put_user_s32(left_fd, target_tab_addr) ||
+        put_user_s32(right_fd, target_tab_addr + sizeof(int32_t))) {
+        close(right_fd);
+        close(left_fd);
+        return -TARGET_EFAULT;
+    }
+
+    return 0;
+}
+
+static int vsockfs_open_flags(int target_type)
+{
+    int flags = O_RDWR;
+
+#ifdef O_CLOEXEC
+    if (target_type & TARGET_SOCK_CLOEXEC) {
+        flags |= O_CLOEXEC;
+    }
+#endif
+#ifdef O_NONBLOCK
+    if (target_type & TARGET_SOCK_NONBLOCK) {
+        flags |= O_NONBLOCK;
+    }
+#endif
+
+    return flags;
+}
+
+static int vsockfs_strip_socket_flags(int host_type)
+{
+#ifdef SOCK_CLOEXEC
+    host_type &= ~SOCK_CLOEXEC;
+#endif
+#ifdef SOCK_NONBLOCK
+    host_type &= ~SOCK_NONBLOCK;
+#endif
+    return host_type;
+}
+
+static abi_long do_vsockfs_sockaddr_ioctl(int fd, int cmd, void *addr,
+                                          socklen_t *addrlen, bool writeback)
+{
+    struct vsockfs_sockaddr req = { 0 };
+    abi_long ret;
+
+    if (writeback) {
+        if (*addrlen > sizeof(req.addr)) {
+            *addrlen = sizeof(req.addr);
+        }
+    } else {
+        if (*addrlen > sizeof(req.addr)) {
+            return -TARGET_EINVAL;
+        }
+        req.addrlen = *addrlen;
+        memcpy(req.addr, addr, *addrlen);
+    }
+
+    ret = get_errno(safe_ioctl(fd, cmd, &req));
+    if (is_error(ret)) {
+        return ret;
+    }
+
+    if (writeback) {
+        socklen_t copylen = MIN(*addrlen, req.addrlen);
+        memcpy(addr, req.addr, copylen);
+        *addrlen = req.addrlen;
+    }
+
+    return ret;
+}
+
+static abi_long do_vsockfs_listen(int fd, int backlog)
+{
+    int host_fd = sockfs_carrier_hostfd(fd);
+
+    if (host_fd >= 0) {
+        abi_long ret = get_errno(listen(host_fd, backlog));
+
+        if (is_error(ret)) {
+            return ret;
+        }
+        return do_vsockfs_attach_host_state(fd, host_fd,
+                                            VSOCKFS_SOCKET_LISTENING,
+                                            backlog);
+    }
+
+    return get_errno(safe_ioctl(fd, IOCTL_VSOCKFS_LISTEN, backlog));
+}
+
+static abi_long do_vsockfs_shutdown(int fd, int how)
+{
+    int host_fd = sockfs_carrier_hostfd(fd);
+    struct vsockfs_shutdown req = {
+        .how = how,
+        .reserved = 0,
+    };
+
+    if (host_fd >= 0) {
+        return get_errno(shutdown(host_fd, how));
+    }
+
+    return get_errno(safe_ioctl(fd, IOCTL_VSOCKFS_SHUTDOWN, &req));
+}
+
+static abi_long do_vsockfs_sendto(int fd, const void *buf, size_t len, int flags,
+                                  void *addr, socklen_t addrlen)
+{
+    struct vsockfs_sendto req = { 0 };
+
+    if (len > sizeof(req.data) || addrlen > sizeof(req.addr)) {
+        return -TARGET_EINVAL;
+    }
+
+    req.flags = flags;
+    req.addrlen = addrlen;
+    req.datalen = len;
+    if (addrlen > 0) {
+        memcpy(req.addr, addr, addrlen);
+    }
+    if (len > 0) {
+        memcpy(req.data, buf, len);
+    }
+
+    return get_errno(safe_ioctl(fd, IOCTL_VSOCKFS_SENDTO, &req));
+}
+
+static abi_long do_vsockfs_recvfrom(int fd, void *buf, size_t len, int flags,
+                                    void *addr, socklen_t *addrlen)
+{
+    struct vsockfs_recvfrom req = {
+        .flags = flags,
+        .buflen = MIN((size_t)VSOCKFS_DGRAM_MAX, len),
+        .out_len = 0,
+        .addrlen = addrlen ? MIN(*addrlen, (socklen_t)sizeof(req.addr)) : 0,
+    };
+    abi_long ret = get_errno(safe_ioctl(fd, IOCTL_VSOCKFS_RECVFROM, &req));
+    size_t copylen;
+
+    if (is_error(ret)) {
+        return ret;
+    }
+
+    copylen = MIN((size_t)req.out_len, len);
+    if (copylen > 0 && buf != NULL) {
+        memcpy(buf, req.data, copylen);
+    }
+    if (addr != NULL && addrlen != NULL) {
+        socklen_t copy_addrlen = MIN(*addrlen, (socklen_t)req.addrlen);
+
+        if (copy_addrlen > 0) {
+            memcpy(addr, req.addr, copy_addrlen);
+        }
+        *addrlen = req.addrlen;
+    }
+
+    return ret;
+}
+
+static abi_long do_vsockfs_sendmsg(int fd, const void *buf, size_t len, int flags,
+                                   void *addr, socklen_t addrlen,
+                                   const void *control, size_t controllen)
+{
+    struct vsockfs_sendmsg req = { 0 };
+
+    if (len > sizeof(req.data) || addrlen > sizeof(req.addr) ||
+        controllen > sizeof(req.control)) {
+        return -TARGET_EINVAL;
+    }
+
+    req.flags = flags;
+    req.addrlen = addrlen;
+    req.datalen = len;
+    req.controllen = controllen;
+    if (addrlen > 0) {
+        memcpy(req.addr, addr, addrlen);
+    }
+    if (controllen > 0) {
+        memcpy(req.control, control, controllen);
+    }
+    if (len > 0) {
+        memcpy(req.data, buf, len);
+    }
+
+    return get_errno(safe_ioctl(fd, IOCTL_VSOCKFS_SENDMSG, &req));
+}
+
+static abi_long do_vsockfs_recvmsg(int fd, void *buf, size_t len, int flags,
+                                   void *addr, socklen_t *addrlen,
+                                   void *control, size_t *controllen,
+                                   int *msg_flags)
+{
+    struct vsockfs_recvmsg req = {
+        .flags = flags,
+        .buflen = MIN((size_t)VSOCKFS_DGRAM_MAX, len),
+        .controllen = controllen ? MIN(*controllen, (size_t)sizeof(req.control)) : 0,
+        .out_len = 0,
+        .out_controllen = 0,
+        .addrlen = addrlen ? MIN(*addrlen, (socklen_t)sizeof(req.addr)) : 0,
+        .msg_flags = 0,
+    };
+    abi_long ret = get_errno(safe_ioctl(fd, IOCTL_VSOCKFS_RECVMSG, &req));
+    size_t copylen;
+
+    if (is_error(ret)) {
+        return ret;
+    }
+
+    copylen = MIN((size_t)req.out_len, len);
+    if (copylen > 0 && buf != NULL) {
+        memcpy(buf, req.data, copylen);
+    }
+    if (addr != NULL && addrlen != NULL) {
+        socklen_t copy_addrlen = MIN(*addrlen, (socklen_t)req.addrlen);
+
+        if (copy_addrlen > 0) {
+            memcpy(addr, req.addr, copy_addrlen);
+        }
+        *addrlen = req.addrlen;
+    }
+    if (control != NULL && controllen != NULL) {
+        size_t copy_controllen = MIN(*controllen, (size_t)req.out_controllen);
+
+        if (copy_controllen > 0) {
+            memcpy(control, req.control, copy_controllen);
+        }
+        *controllen = req.out_controllen;
+    }
+    if (msg_flags != NULL) {
+        *msg_flags = req.msg_flags;
+    }
+
+    return ret;
+}
+
+static bool vsockfs_translate_sol_socket_optname(int target_optname, int *host_optname)
+{
+    switch (target_optname) {
+    case TARGET_SO_DEBUG:
+        *host_optname = SO_DEBUG;
+        return true;
+    case TARGET_SO_REUSEADDR:
+        *host_optname = SO_REUSEADDR;
+        return true;
+#ifdef SO_REUSEPORT
+    case TARGET_SO_REUSEPORT:
+        *host_optname = SO_REUSEPORT;
+        return true;
+#endif
+    case TARGET_SO_TYPE:
+        *host_optname = SO_TYPE;
+        return true;
+    case TARGET_SO_ERROR:
+        *host_optname = SO_ERROR;
+        return true;
+    case TARGET_SO_DONTROUTE:
+        *host_optname = SO_DONTROUTE;
+        return true;
+    case TARGET_SO_BROADCAST:
+        *host_optname = SO_BROADCAST;
+        return true;
+    case TARGET_SO_SNDBUF:
+        *host_optname = SO_SNDBUF;
+        return true;
+    case TARGET_SO_SNDBUFFORCE:
+        *host_optname = SO_SNDBUFFORCE;
+        return true;
+    case TARGET_SO_RCVBUF:
+        *host_optname = SO_RCVBUF;
+        return true;
+    case TARGET_SO_RCVBUFFORCE:
+        *host_optname = SO_RCVBUFFORCE;
+        return true;
+    case TARGET_SO_KEEPALIVE:
+        *host_optname = SO_KEEPALIVE;
+        return true;
+    case TARGET_SO_OOBINLINE:
+        *host_optname = SO_OOBINLINE;
+        return true;
+    case TARGET_SO_NO_CHECK:
+        *host_optname = SO_NO_CHECK;
+        return true;
+    case TARGET_SO_PRIORITY:
+        *host_optname = SO_PRIORITY;
+        return true;
+#ifdef SO_BSDCOMPAT
+    case TARGET_SO_BSDCOMPAT:
+        *host_optname = SO_BSDCOMPAT;
+        return true;
+#endif
+    case TARGET_SO_PASSCRED:
+        *host_optname = SO_PASSCRED;
+        return true;
+#ifdef SO_PASSSEC
+    case TARGET_SO_PASSSEC:
+        *host_optname = SO_PASSSEC;
+        return true;
+#endif
+    case TARGET_SO_TIMESTAMP:
+        *host_optname = SO_TIMESTAMP;
+        return true;
+    case TARGET_SO_RCVLOWAT:
+        *host_optname = SO_RCVLOWAT;
+        return true;
+    case TARGET_SO_ACCEPTCONN:
+        *host_optname = SO_ACCEPTCONN;
+        return true;
+#ifdef SO_PROTOCOL
+    case TARGET_SO_PROTOCOL:
+        *host_optname = SO_PROTOCOL;
+        return true;
+#endif
+#ifdef SO_DOMAIN
+    case TARGET_SO_DOMAIN:
+        *host_optname = SO_DOMAIN;
+        return true;
+#endif
+    default:
+        return false;
+    }
+}
+
+static abi_long do_vsockfs_setsockopt(int fd, int level, int optname,
+                                      abi_ulong optval_addr, socklen_t optlen)
+{
+    struct vsockfs_sockopt req = { 0 };
+    int host_optname = optname;
+    int host_fd = sockfs_carrier_hostfd(fd);
+    bool translated_sol_socket = false;
+
+    if (optlen > sizeof(req.data)) {
+        return -TARGET_EINVAL;
+    }
+
+    if (level == TARGET_SOL_SOCKET &&
+        vsockfs_translate_sol_socket_optname(optname, &host_optname)) {
+        translated_sol_socket = true;
+        req.level = SOL_SOCKET;
+        req.optname = host_optname;
+    } else {
+        req.level = level;
+        req.optname = optname;
+    }
+    req.optlen = optlen;
+
+    if (optlen > 0) {
+        if (translated_sol_socket) {
+            uint32_t val;
+
+            if (optlen < sizeof(uint32_t)) {
+                return -TARGET_EINVAL;
+            }
+            if (get_user_u32(val, optval_addr)) {
+                return -TARGET_EFAULT;
+            }
+            memcpy(req.data, &val, sizeof(val));
+            req.optlen = sizeof(val);
+        } else {
+            if (copy_from_user(req.data, optval_addr, optlen)) {
+                return -TARGET_EFAULT;
+            }
+        }
+    }
+
+    if (host_fd >= 0) {
+        return get_errno(setsockopt(host_fd, req.level, req.optname,
+                                    req.data, req.optlen));
+    }
+
+    return get_errno(safe_ioctl(fd, IOCTL_VSOCKFS_SETSOCKOPT, &req));
+}
+
+static abi_long do_vsockfs_getsockopt(int fd, int level, int optname,
+                                      abi_ulong optval_addr, abi_ulong optlen_addr)
+{
+    struct vsockfs_sockopt req = { 0 };
+    int host_optname = optname;
+    int host_fd = sockfs_carrier_hostfd(fd);
+    bool translated_sol_socket = false;
+    abi_long ret;
+    int len;
+    socklen_t copylen;
+
+    if (get_user_u32(len, optlen_addr)) {
+        return -TARGET_EFAULT;
+    }
+    if (len < 0) {
+        return -TARGET_EINVAL;
+    }
+
+    if (level == TARGET_SOL_SOCKET &&
+        vsockfs_translate_sol_socket_optname(optname, &host_optname)) {
+        translated_sol_socket = true;
+        req.level = SOL_SOCKET;
+        req.optname = host_optname;
+    } else {
+        req.level = level;
+        req.optname = optname;
+    }
+    req.optlen = MIN((socklen_t)len, (socklen_t)sizeof(req.data));
+
+    if (host_fd >= 0) {
+        socklen_t host_optlen = req.optlen;
+
+        ret = get_errno(getsockopt(host_fd, req.level, req.optname,
+                                   req.data, &host_optlen));
+        req.optlen = host_optlen;
+    } else {
+        ret = get_errno(safe_ioctl(fd, IOCTL_VSOCKFS_GETSOCKOPT, &req));
+    }
+    if (is_error(ret)) {
+        return ret;
+    }
+
+    copylen = MIN((socklen_t)len, req.optlen);
+    if (translated_sol_socket) {
+        uint32_t val = 0;
+
+        if (req.optlen >= sizeof(val)) {
+            memcpy(&val, req.data, sizeof(val));
+        }
+
+        switch (host_optname) {
+        case SO_TYPE:
+            val = host_to_target_sock_type(val);
+            break;
+        case SO_ERROR:
+            val = host_to_target_errno(val);
+            break;
+        default:
+            break;
+        }
+
+        if (copylen >= sizeof(uint32_t)) {
+            if (put_user_u32(val, optval_addr)) {
+                return -TARGET_EFAULT;
+            }
+            copylen = sizeof(uint32_t);
+        } else if (copylen >= 1) {
+            if (put_user_u8(val, optval_addr)) {
+                return -TARGET_EFAULT;
+            }
+            copylen = 1;
+        }
+    } else if (copylen > 0) {
+        if (copy_to_user(optval_addr, req.data, copylen)) {
+            return -TARGET_EFAULT;
+        }
+    }
+
+    if (put_user_u32(copylen, optlen_addr)) {
+        return -TARGET_EFAULT;
+    }
+
+    return 0;
+}
+
+static abi_long do_vsockfs_accept4(int listener_fd, abi_ulong target_addr,
+                                   abi_ulong target_addrlen_addr, int flags)
+{
+    int listener_host_fd = sockfs_carrier_hostfd(listener_fd);
+    socklen_t addrlen = 0, ret_addrlen = 0;
+    void *addr = NULL;
+    abi_long ret;
+
+    if (listener_host_fd >= 0) {
+        int host_flags = 0;
+        int accepted_host_fd;
+        abi_long attach_ret;
+
+        if (flags & TARGET_SOCK_NONBLOCK) {
+            host_flags |= SOCK_NONBLOCK;
+        }
+        if (flags & TARGET_SOCK_CLOEXEC) {
+            host_flags |= SOCK_CLOEXEC;
+        }
+
+        if (target_addr != 0) {
+            if (get_user_u32(addrlen, target_addrlen_addr)) {
+                return -TARGET_EFAULT;
+            }
+            if ((int)addrlen < 0) {
+                return -TARGET_EINVAL;
+            }
+            if (!access_ok(thread_cpu, VERIFY_WRITE, target_addr, addrlen)) {
+                return -TARGET_EFAULT;
+            }
+            addr = alloca(addrlen);
+            ret_addrlen = addrlen;
+        }
+
+        accepted_host_fd = get_errno(safe_accept4(listener_host_fd, addr,
+                                                  target_addr ? &ret_addrlen : NULL,
+                                                  host_flags));
+        if (is_error(accepted_host_fd)) {
+            return accepted_host_fd;
+        }
+
+        ret = sockfs_open_accept(listener_fd, flags);
+        if (is_error(ret)) {
+            close(accepted_host_fd);
+            return ret;
+        }
+
+        attach_ret = do_vsockfs_attach_host_state(ret, accepted_host_fd,
+                                                  VSOCKFS_SOCKET_CONNECTED, 0);
+        if (is_error(attach_ret)) {
+            close(accepted_host_fd);
+            close(ret);
+            fd_trans_unregister(ret);
+            return attach_ret;
+        }
+
+        sockfs_carrier_register(ret, accepted_host_fd, true);
+
+        if (target_addr != 0) {
+            host_to_target_sockaddr(target_addr, addr, MIN(addrlen, ret_addrlen));
+            if (put_user_u32(ret_addrlen, target_addrlen_addr)) {
+                return -TARGET_EFAULT;
+            }
+        }
+
+        return ret;
+    }
+
+    if (target_addr != 0) {
+        if (get_user_u32(addrlen, target_addrlen_addr)) {
+            return -TARGET_EFAULT;
+        }
+        if ((int)addrlen < 0) {
+            return -TARGET_EINVAL;
+        }
+        if (!access_ok(thread_cpu, VERIFY_WRITE, target_addr, addrlen)) {
+            return -TARGET_EFAULT;
+        }
+        addr = alloca(addrlen);
+        ret_addrlen = addrlen;
+    }
+
+    ret = sockfs_open_accept(listener_fd, flags);
+    if (is_error(ret)) {
+        return ret;
+    }
+
+    if (target_addr != 0) {
+        abi_long name_ret = do_vsockfs_sockaddr_ioctl(ret, IOCTL_VSOCKFS_GETPEERNAME, addr,
+                                                      &ret_addrlen, true);
+        if (!is_error(name_ret)) {
+            host_to_target_sockaddr(target_addr, addr, MIN(addrlen, ret_addrlen));
+            if (put_user_u32(ret_addrlen, target_addrlen_addr)) {
+                return -TARGET_EFAULT;
+            }
+        }
+    }
+
+    return ret;
+}
+
+static abi_long do_vsockfs_socket(int domain, int type, int protocol, int target_type)
+{
+    int host_fd = socket(domain, type, protocol);
+    abi_long ret = sockfs_open_socket(domain, type, protocol, target_type);
+
+    if (is_error(ret)) {
+        if (host_fd >= 0) {
+            close(host_fd);
+        }
+        return ret;
+    }
+
+    if (host_fd < 0) {
+        return ret;
+    }
+
+    {
+        abi_long attach_ret = do_vsockfs_attach_host_state(ret, host_fd,
+                                                           VSOCKFS_SOCKET_CREATED, 0);
+        if (is_error(attach_ret)) {
+            close(host_fd);
+            close(ret);
+            fd_trans_unregister(ret);
+            return attach_ret;
+        }
+    }
+
+    sockfs_carrier_register(ret, host_fd, true);
+    return ret;
+}
+#endif
+
 /* do_socket() Must return target values and target errnos. */
 static abi_long do_socket(int domain, int type, int protocol)
 {
     int target_type = type;
     int ret;
+    bool force_vsockfs = false;
 
     ret = target_to_host_sock_type(&type);
     if (ret) {
@@ -3310,7 +4308,11 @@ static abi_long do_socket(int domain, int type, int protocol)
 #endif
          protocol == NETLINK_KOBJECT_UEVENT ||
          protocol == NETLINK_AUDIT)) {
+#ifndef NO_EMU_HOOKS
+        force_vsockfs = true;
+#else
         return -TARGET_EPROTONOSUPPORT;
+#endif
     }
 
 #ifndef NO_EMU_HOOKS
@@ -3326,15 +4328,26 @@ static abi_long do_socket(int domain, int type, int protocol)
         protocol = tswap16(protocol);
     }
 
+    if (force_vsockfs) {
+#ifndef NO_EMU_HOOKS
+        return do_vsockfs_socket(domain, type, protocol, target_type);
+#else
+        return -TARGET_EPROTONOSUPPORT;
+#endif
+    }
+
+#ifndef NO_EMU_HOOKS
+    return do_vsockfs_socket(domain, type, protocol, target_type);
+#else
     ret = get_errno(socket(domain, type, protocol));
     if (ret >= 0) {
         ret = sock_flags_fixup(ret, target_type);
-        if (type == SOCK_PACKET) {
+        if (ret >= 0 && type == SOCK_PACKET) {
             /* Manage an obsolete case :
              * if socket type is SOCK_PACKET, bind by name
              */
             fd_trans_register(ret, &target_packet_trans);
-        } else if (domain == PF_NETLINK) {
+        } else if (ret >= 0 && domain == PF_NETLINK) {
             switch (protocol) {
 #ifdef CONFIG_RTNETLINK
             case NETLINK_ROUTE:
@@ -3352,6 +4365,7 @@ static abi_long do_socket(int domain, int type, int protocol)
             }
         }
     }
+#endif
 #if 0
 #ifndef NO_EMU_HOOKS
     else if (ret == -EACCESS || ret == -EAFNOSUPPORT | ret == -EINVAL || ret == -EPROTONOSUPPORT) {
@@ -3398,6 +4412,20 @@ static abi_long do_bind(int sockfd, abi_ulong target_addr,
     ret = target_to_host_sockaddr(sockfd, addr, target_addr, addrlen);
     if (ret) 
         return ret;
+
+    if (sockfs_fd_p(sockfd)) {
+        int host_fd = sockfs_carrier_hostfd(sockfd);
+
+        if (host_fd >= 0) {
+            ret = get_errno(bind(host_fd, addr, addrlen));
+            if (is_error(ret)) {
+                return ret;
+            }
+            return do_vsockfs_attach_host_state(sockfd, host_fd,
+                                                VSOCKFS_SOCKET_BOUND, 0);
+        }
+        return do_vsockfs_sockaddr_ioctl(sockfd, IOCTL_VSOCKFS_BIND, addr, &addrlen, false);
+    }
 
     /* GREENHOUSE PATCH */
     family = ((struct sockaddr*)addr)->sa_family;
@@ -3526,7 +4554,58 @@ static abi_long do_connect(int sockfd, abi_ulong target_addr,
     if (ret)
         return ret;
 
+ #ifndef NO_EMU_HOOKS
+    if (sockfs_fd_p(sockfd)) {
+        int host_fd = sockfs_carrier_hostfd(sockfd);
+
+        if (host_fd >= 0) {
+            ret = get_errno(safe_connect(host_fd, addr, addrlen));
+            if (is_error(ret)) {
+                return ret;
+            }
+            return do_vsockfs_attach_host_state(sockfd, host_fd,
+                                                VSOCKFS_SOCKET_CONNECTED, 0);
+        }
+        return do_vsockfs_sockaddr_ioctl(sockfd, IOCTL_VSOCKFS_CONNECT, addr, &addrlen, false);
+    }
+ #endif
+
     return get_errno(safe_connect(sockfd, addr, addrlen));
+}
+
+static size_t iov_total_len(const struct iovec *vec, abi_ulong count)
+{
+    size_t total = 0;
+    abi_ulong i;
+
+    for (i = 0; i < count; i++) {
+        total += vec[i].iov_len;
+    }
+    return total;
+}
+
+static void iov_flatten(char *dst, const struct iovec *vec, abi_ulong count)
+{
+    abi_ulong i;
+
+    for (i = 0; i < count; i++) {
+        memcpy(dst, vec[i].iov_base, vec[i].iov_len);
+        dst += vec[i].iov_len;
+    }
+}
+
+static void iov_scatter(struct iovec *vec, abi_ulong count, const char *src, size_t len)
+{
+    abi_ulong i;
+    size_t remaining = len;
+
+    for (i = 0; i < count && remaining > 0; i++) {
+        size_t copylen = MIN((size_t)vec[i].iov_len, remaining);
+
+        memcpy(vec[i].iov_base, src, copylen);
+        src += copylen;
+        remaining -= copylen;
+    }
 }
 
 /* do_sendrecvmsg_locked() Must return target values and target errnos. */
@@ -3587,6 +4666,96 @@ static abi_long do_sendrecvmsg_locked(int fd, struct target_msghdr *msgp,
     }
     msg.msg_iovlen = count;
     msg.msg_iov = vec;
+
+ #ifndef NO_EMU_HOOKS
+    if (sockfs_fd_p(fd)) {
+        size_t total_len;
+        size_t alloc_len;
+        char *flat_buf;
+        abi_long target_controllen;
+        abi_ulong target_control;
+        size_t control_len;
+        uint8_t control_buf[VSOCKFS_MSG_CONTROL_MAX];
+
+        if (msg.msg_name == (void *)-1) {
+            ret = -TARGET_EFAULT;
+            goto out;
+        }
+
+        target_controllen = tswapal(msgp->msg_controllen);
+        target_control = tswapal(msgp->msg_control);
+        if (target_controllen < 0) {
+            ret = -TARGET_EINVAL;
+            goto out;
+        }
+        control_len = MIN((size_t)target_controllen, (size_t)VSOCKFS_MSG_CONTROL_MAX);
+        if (target_controllen > VSOCKFS_MSG_CONTROL_MAX) {
+            ret = -TARGET_EINVAL;
+            goto out;
+        }
+
+        total_len = iov_total_len(vec, count);
+        alloc_len = MAX((size_t)1, total_len);
+        flat_buf = g_malloc(alloc_len);
+
+        if (send) {
+            if (control_len > 0) {
+                if (copy_from_user(control_buf, target_control, control_len)) {
+                    g_free(flat_buf);
+                    ret = -TARGET_EFAULT;
+                    goto out;
+                }
+            }
+            if (total_len > 0) {
+                iov_flatten(flat_buf, vec, count);
+            }
+            if (msg.msg_name != NULL || control_len > 0) {
+                ret = do_vsockfs_sendmsg(fd, flat_buf, total_len, flags,
+                                         msg.msg_name, msg.msg_namelen,
+                                         control_buf, control_len);
+            } else {
+                ret = get_errno(safe_write(fd, flat_buf, total_len));
+            }
+        } else {
+            if (msg.msg_name != NULL || control_len > 0) {
+                ret = do_vsockfs_recvmsg(fd, flat_buf, total_len, flags,
+                                         msg.msg_name, &msg.msg_namelen,
+                                         control_buf, &control_len,
+                                         &msg.msg_flags);
+            } else {
+                ret = get_errno(safe_read(fd, flat_buf, total_len));
+            }
+            if (!is_error(ret)) {
+                if (ret > 0) {
+                    iov_scatter(vec, count, flat_buf, ret);
+                }
+                msgp->msg_flags = tswap32(msg.msg_flags);
+                if (control_len > 0) {
+                    if (copy_to_user(target_control, control_buf, control_len)) {
+                        g_free(flat_buf);
+                        ret = -TARGET_EFAULT;
+                        goto out;
+                    }
+                }
+                msgp->msg_controllen = tswapal(control_len);
+                if (msg.msg_name != NULL) {
+                    abi_long addr_ret = host_to_target_sockaddr(tswapal(msgp->msg_name),
+                                                                msg.msg_name,
+                                                                msg.msg_namelen);
+                    if (addr_ret) {
+                        g_free(flat_buf);
+                        ret = addr_ret;
+                        goto out;
+                    }
+                }
+                msgp->msg_namelen = tswap32(msg.msg_namelen);
+            }
+        }
+
+        g_free(flat_buf);
+        goto out;
+    }
+ #endif
 
     if (send) {
         if (fd_trans_target_to_host_data(fd)) {
@@ -3707,6 +4876,16 @@ static abi_long do_sendrecvmmsg(int fd, abi_ulong target_msgvec,
 }
 
 /* do_accept4() Must return target values and target errnos. */
+static abi_long do_listen(int fd, int backlog)
+{
+#ifndef NO_EMU_HOOKS
+    if (sockfs_fd_p(fd)) {
+        return do_vsockfs_listen(fd, backlog);
+    }
+#endif
+    return get_errno(listen(fd, backlog));
+}
+
 static abi_long do_accept4(int fd, abi_ulong target_addr,
                            abi_ulong target_addrlen_addr, int flags)
 {
@@ -3728,6 +4907,11 @@ static abi_long do_accept4(int fd, abi_ulong target_addr,
     }
 
     if (target_addr == 0) {
+#ifndef NO_EMU_HOOKS
+        if (sockfs_fd_p(fd)) {
+            return do_vsockfs_accept4(fd, 0, 0, flags);
+        }
+#endif
         return get_errno(safe_accept4(fd, NULL, NULL, host_flags));
     }
 
@@ -3746,11 +4930,17 @@ static abi_long do_accept4(int fd, abi_ulong target_addr,
     addr = alloca(addrlen);
 
     ret_addrlen = addrlen;
-    ret = get_errno(safe_accept4(fd, addr, &ret_addrlen, host_flags));
+    if (sockfs_fd_p(fd)) {
+        ret = do_vsockfs_accept4(fd, target_addr, target_addrlen_addr, flags);
+    } else {
+        ret = get_errno(safe_accept4(fd, addr, &ret_addrlen, host_flags));
+    }
     if (!is_error(ret)) {
-        host_to_target_sockaddr(target_addr, addr, MIN(addrlen, ret_addrlen));
-        if (put_user_u32(ret_addrlen, target_addrlen_addr)) {
-            ret = -TARGET_EFAULT;
+        if (!sockfs_fd_p(fd)) {
+            host_to_target_sockaddr(target_addr, addr, MIN(addrlen, ret_addrlen));
+            if (put_user_u32(ret_addrlen, target_addrlen_addr)) {
+                ret = -TARGET_EFAULT;
+            }
         }
     }
     return ret;
@@ -3778,7 +4968,14 @@ static abi_long do_getpeername(int fd, abi_ulong target_addr,
     addr = alloca(addrlen);
 
     ret_addrlen = addrlen;
-    ret = get_errno(getpeername(fd, addr, &ret_addrlen));
+#ifndef NO_EMU_HOOKS
+    if (sockfs_fd_p(fd)) {
+        ret = do_vsockfs_sockaddr_ioctl(fd, IOCTL_VSOCKFS_GETPEERNAME, addr, &ret_addrlen, true);
+    } else
+#endif
+    {
+        ret = get_errno(getpeername(fd, addr, &ret_addrlen));
+    }
     if (!is_error(ret)) {
         host_to_target_sockaddr(target_addr, addr, MIN(addrlen, ret_addrlen));
         if (put_user_u32(ret_addrlen, target_addrlen_addr)) {
@@ -3810,7 +5007,14 @@ static abi_long do_getsockname(int fd, abi_ulong target_addr,
     addr = alloca(addrlen);
 
     ret_addrlen = addrlen;
-    ret = get_errno(getsockname(fd, addr, &ret_addrlen));
+#ifndef NO_EMU_HOOKS
+    if (sockfs_fd_p(fd)) {
+        ret = do_vsockfs_sockaddr_ioctl(fd, IOCTL_VSOCKFS_GETSOCKNAME, addr, &ret_addrlen, true);
+    } else
+#endif
+    {
+        ret = get_errno(getsockname(fd, addr, &ret_addrlen));
+    }
     if (!is_error(ret)) {
         host_to_target_sockaddr(target_addr, addr, MIN(addrlen, ret_addrlen));
         if (put_user_u32(ret_addrlen, target_addrlen_addr)) {
@@ -3824,11 +5028,14 @@ static abi_long do_getsockname(int fd, abi_ulong target_addr,
 static abi_long do_socketpair(int domain, int type, int protocol,
                               abi_ulong target_tab_addr)
 {
-    int tab[2];
-    abi_long ret;
-
+    int target_type = type;
     target_to_host_sock_type(&type);
 
+#ifndef NO_EMU_HOOKS
+    return sockfs_open_socketpair(domain, type, protocol, target_type, target_tab_addr);
+#else
+    int tab[2];
+    abi_long ret;
     ret = get_errno(socketpair(domain, type, protocol, tab));
     if (!is_error(ret)) {
         if (put_user_s32(tab[0], target_tab_addr)
@@ -3836,6 +5043,7 @@ static abi_long do_socketpair(int domain, int type, int protocol,
             ret = -TARGET_EFAULT;
     }
     return ret;
+#endif
 }
 
 /* do_sendto() Must return target values and target errnos. */
@@ -3854,6 +5062,19 @@ static abi_long do_sendto(int fd, abi_ulong msg, size_t len, int flags,
     host_msg = lock_user(VERIFY_READ, msg, len, 1);
     if (!host_msg)
         return -TARGET_EFAULT;
+    if (sockfs_fd_p(fd)) {
+        if (target_addr) {
+            addr = alloca(addrlen + 1);
+            ret = target_to_host_sockaddr(fd, addr, target_addr, addrlen);
+            if (ret) {
+                goto fail;
+            }
+            ret = do_vsockfs_sendto(fd, host_msg, len, flags, addr, addrlen);
+            goto fail;
+        }
+        ret = get_errno(safe_write(fd, host_msg, len));
+        goto fail;
+    }
     if (fd_trans_target_to_host_data(fd)) {
         copy_msg = host_msg;
         host_msg = g_malloc(len);
@@ -3911,15 +5132,23 @@ static abi_long do_recvfrom(int fd, abi_ulong msg, size_t len, int flags,
         }
         addr = alloca(addrlen);
         ret_addrlen = addrlen;
-        ret = get_errno(safe_recvfrom(fd, host_msg, len, flags,
-                                      addr, &ret_addrlen));
+        if (sockfs_fd_p(fd)) {
+            ret = do_vsockfs_recvfrom(fd, host_msg, len, flags, addr, &ret_addrlen);
+        } else {
+            ret = get_errno(safe_recvfrom(fd, host_msg, len, flags,
+                                          addr, &ret_addrlen));
+        }
     } else {
         addr = NULL; /* To keep compiler quiet.  */
         addrlen = 0; /* To keep compiler quiet.  */
-        ret = get_errno(safe_recvfrom(fd, host_msg, len, flags, NULL, 0));
+        if (sockfs_fd_p(fd)) {
+            ret = get_errno(safe_read(fd, host_msg, len));
+        } else {
+            ret = get_errno(safe_recvfrom(fd, host_msg, len, flags, NULL, 0));
+        }
     }
     if (!is_error(ret)) {
-        if (fd_trans_host_to_target_data(fd)) {
+        if (!sockfs_fd_p(fd) && fd_trans_host_to_target_data(fd)) {
             abi_long trans;
             trans = fd_trans_host_to_target_data(fd)(host_msg, MIN(ret, len));
             if (is_error(trans)) {
@@ -3996,7 +5225,7 @@ static abi_long do_socketcall(int num, abi_ulong vptr)
     case TARGET_SYS_CONNECT: /* sockfd, addr, addrlen */
         return do_connect(a[0], a[1], a[2]);
     case TARGET_SYS_LISTEN: /* sockfd, backlog */
-        return get_errno(listen(a[0], a[1]));
+        return do_listen(a[0], a[1]);
     case TARGET_SYS_ACCEPT: /* sockfd, addr, addrlen */
         return do_accept4(a[0], a[1], a[2], 0);
     case TARGET_SYS_GETSOCKNAME: /* sockfd, addr, addrlen */
@@ -4014,6 +5243,9 @@ static abi_long do_socketcall(int num, abi_ulong vptr)
     case TARGET_SYS_RECVFROM: /* sockfd, msg, len, flags, addr, addrlen */
         return do_recvfrom(a[0], a[1], a[2], a[3], a[4], a[5]);
     case TARGET_SYS_SHUTDOWN: /* sockfd, how */
+        if (sockfs_fd_p(a[0])) {
+            return do_vsockfs_shutdown(a[0], a[1]);
+        }
         return get_errno(shutdown(a[0], a[1]));
     case TARGET_SYS_SETSOCKOPT: /* sockfd, level, optname, optval, optlen */
         return do_setsockopt(a[0], a[1], a[2], a[3], a[4]);
@@ -6054,7 +7286,7 @@ static abi_long do_compat_ioctl(int fd, int cmd, abi_long arg) {
 
 static abi_long do_compat_ioctl_socket(const IOCTLEntry *ie, uint8_t *buf_temp,
                                        int fd, int cmd, abi_long arg) {
-    return 0;
+    return do_compat_ioctl(fd, cmd, arg);
 }
 #endif
 
@@ -6083,7 +7315,11 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
     ie = ioctl_entries;
     for(;;) {
         // HACK: always pass through FIBMAP, FIGETBSZ for compatibility with some nvram
-        if (ie->target_cmd == 0 || ioctl_cmd_may_conflict(cmd)) {
+        if (ie->target_cmd == 0
+#ifndef NO_EMU_HOOKS
+            || ioctl_cmd_may_conflict(cmd)
+#endif
+        ) {
 #ifndef NO_EMU_HOOKS
             break;
 #else
@@ -10364,12 +11600,19 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         //     // For compatible with symlink ttys which point to /proc/self/fd/0
         //     return 0;
         // }
-        // fd_dev_info_unregister(arg1);
 #endif // NO_EMU_HOOKS
-        fd_trans_unregister(arg1);
-        return get_errno(close(arg1));
+        ret = get_errno(close(arg1));
+#ifndef NO_EMU_HOOKS
+        if (ret == 0) {
+        }
+#endif // NO_EMU_HOOKS
+        if (ret == 0) {
+            fd_trans_unregister(arg1);
+        }
+        return ret;
 #if defined(__NR_close_range) && defined(TARGET_NR_close_range)
     case TARGET_NR_close_range:
+    {
 #ifndef NO_EMU_HOOKS
         // The following code is not tested
         int log_fd = qemu_log_fd();
@@ -10400,13 +11643,13 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             abi_long fd, maxfd;
             maxfd = MIN(arg2, target_fd_max);
             for (fd = arg1; fd < maxfd; fd++) {
-                fd_trans_unregister(fd);
 #ifndef NO_EMU_HOOKS
-                // fd_dev_info_unregister(fd);
 #endif // NO_EMU_HOOKS
+                fd_trans_unregister(fd);
             }
         }
         return ret;
+    }
 #endif
 
     case TARGET_NR_brk:
@@ -10953,9 +12196,6 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
     case TARGET_NR_dup:
         ret = get_errno(dup(arg1));
         if (ret >= 0) {
-#ifndef NO_EMU_HOOKS
-            // fd_dev_info_dup(arg1, ret);
-#endif // NO_EMU_HOOKS
             fd_trans_dup(arg1, ret);
         }
         return ret;
@@ -11950,7 +13190,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
 #endif
 #ifdef TARGET_NR_listen
     case TARGET_NR_listen:
-        return get_errno(listen(arg1, arg2));
+        return do_listen(arg1, arg2);
 #endif
 #ifdef TARGET_NR_recv
     case TARGET_NR_recv:
@@ -11986,6 +13226,9 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
 #endif
 #ifdef TARGET_NR_shutdown
     case TARGET_NR_shutdown:
+        if (sockfs_fd_p(arg1)) {
+            return do_vsockfs_shutdown(arg1, arg2);
+        }
         return get_errno(shutdown(arg1, arg2));
 #endif
 #if defined(TARGET_NR_getrandom) && defined(__NR_getrandom)
@@ -14521,11 +15764,13 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
 #if defined(CONFIG_EPOLL)
 #if defined(TARGET_NR_epoll_create)
     case TARGET_NR_epoll_create:
-        return get_errno(epoll_create(arg1));
+        ret = get_errno(epoll_create(arg1));
+        return ret;
 #endif
 #if defined(TARGET_NR_epoll_create1) && defined(CONFIG_EPOLL_CREATE1)
     case TARGET_NR_epoll_create1:
-        return get_errno(epoll_create1(target_to_host_bitmask(arg1, fcntl_flags_tbl)));
+        ret = get_errno(epoll_create1(target_to_host_bitmask(arg1, fcntl_flags_tbl)));
+        return ret;
 #endif
 #if defined(TARGET_NR_epoll_ctl)
     case TARGET_NR_epoll_ctl:
@@ -14551,7 +15796,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
              * before kernel 2.6.9, EPOLL_CTL_DEL operation required a
              * non-null pointer, even though this argument is ignored.
              *
-             */
+            */
             epp = &ep;
         }
         return get_errno(epoll_ctl(arg1, arg2, arg3, epp));
@@ -14588,36 +15833,40 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             return -TARGET_ENOMEM;
         }
 
-        switch (num) {
-#if defined(TARGET_NR_epoll_pwait)
-        case TARGET_NR_epoll_pwait:
         {
-            sigset_t *set = NULL;
+            switch (num) {
+#if defined(TARGET_NR_epoll_pwait)
+                case TARGET_NR_epoll_pwait:
+                {
+                    sigset_t *set = NULL;
 
-            if (arg5) {
-                ret = process_sigsuspend_mask(&set, arg5, arg6);
-                if (ret != 0) {
+                    if (arg5) {
+                        ret = process_sigsuspend_mask(&set, arg5, arg6);
+                        if (ret != 0) {
+                            break;
+                        }
+                    }
+
+                    ret = get_errno(safe_epoll_pwait(epfd, ep,
+                                                         maxevents, timeout,
+                                                         set, SIGSET_T_SIZE));
+
+                    if (set) {
+                        finish_sigsuspend_mask(ret);
+                    }
                     break;
                 }
-            }
-
-            ret = get_errno(safe_epoll_pwait(epfd, ep, maxevents, timeout,
-                                             set, SIGSET_T_SIZE));
-
-            if (set) {
-                finish_sigsuspend_mask(ret);
-            }
-            break;
-        }
 #endif
 #if defined(TARGET_NR_epoll_wait)
-        case TARGET_NR_epoll_wait:
-            ret = get_errno(safe_epoll_pwait(epfd, ep, maxevents, timeout,
-                                             NULL, 0));
-            break;
+                case TARGET_NR_epoll_wait:
+                    ret = get_errno(safe_epoll_pwait(epfd, ep,
+                                                         maxevents, timeout,
+                                                         NULL, 0));
+                    break;
 #endif
-        default:
-            ret = -TARGET_ENOSYS;
+                default:
+                    ret = -TARGET_ENOSYS;
+                }
         }
         if (!is_error(ret)) {
             int i;
