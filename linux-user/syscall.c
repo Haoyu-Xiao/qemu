@@ -999,6 +999,8 @@ abi_long do_brk(abi_ulong brk_val)
 static bool sockfs_fd_p(int fd);
 static int vsockfs_open_flags(int target_type);
 static int vsockfs_strip_socket_flags(int host_type);
+static inline void ioctl_compat_log(int fd);
+static inline void ioctl_compat_flush(int fd);
 #else
 static inline bool sockfs_fd_p(int fd)
 {
@@ -1069,6 +1071,36 @@ static inline abi_long do_vsockfs_recvmsg(int fd, void *buf, size_t len, int fla
 {
     (void)fd; (void)buf; (void)len; (void)flags; (void)addr; (void)addrlen;
     (void)control; (void)controllen; (void)msg_flags;
+    return -TARGET_ENOSYS;
+}
+
+#define VSOCKFS_DATA_COMPAT_OP_PRE_SEND 1
+#define VSOCKFS_DATA_COMPAT_OP_POST_RECV 2
+#define VSOCKFS_DATA_COMPAT_OP_PRE_SENDTO 3
+#define VSOCKFS_DATA_COMPAT_OP_POST_RECVFROM 4
+#define VSOCKFS_DATA_COMPAT_OP_PRE_SENDMSG 5
+#define VSOCKFS_DATA_COMPAT_OP_POST_RECVMSG 6
+static inline abi_long do_vsockfs_transform_host_data(int fd, uint32_t op,
+                                                      const uint8_t *payload,
+                                                      size_t payload_len,
+                                                      const uint8_t *addr,
+                                                      size_t addr_len,
+                                                      const uint8_t *control,
+                                                      size_t control_len,
+                                                      int *flags,
+                                                      uint8_t **out_payload,
+                                                      size_t *out_payload_len,
+                                                      uint8_t **out_addr,
+                                                      size_t *out_addr_len,
+                                                      uint8_t **out_control,
+                                                      size_t *out_control_len,
+                                                      bool *has_ret_len,
+                                                      size_t *ret_len_out)
+{
+    (void)fd; (void)op; (void)payload; (void)payload_len; (void)addr; (void)addr_len;
+    (void)control; (void)control_len; (void)flags; (void)out_payload; (void)out_payload_len;
+    (void)out_addr; (void)out_addr_len; (void)out_control; (void)out_control_len;
+    (void)has_ret_len; (void)ret_len_out;
     return -TARGET_ENOSYS;
 }
 
@@ -3430,6 +3462,8 @@ static int sock_flags_fixup(int fd, int target_type)
     HOST_IOC(0x9F, 's', sizeof(struct vsockfs_recvmsg), HOST_IOC_READ | HOST_IOC_WRITE)
 #define IOCTL_VSOCKFS_ATTACH_HOST \
     HOST_IOC(0xA0, 's', sizeof(struct vsockfs_host_attach), HOST_IOC_READ | HOST_IOC_WRITE)
+#define IOCTL_VSOCKFS_DATA_COMPAT \
+    HOST_IOC(0xA1, 's', 0, 0)
 
 #define VSOCKFS_SOCKET_CREATED 1
 #define VSOCKFS_SOCKET_BOUND 2
@@ -3528,6 +3562,33 @@ struct vsockfs_shutdown {
     uint32_t reserved;
 };
 
+struct vsockfs_data_compat_req {
+    uint32_t op;
+    int32_t flags;
+    int32_t errno_value;
+    uint32_t payload_len;
+    uint32_t addr_len;
+    uint32_t control_len;
+};
+
+struct vsockfs_data_compat_resp {
+    int32_t flags;
+    int32_t errno_value;
+    uint32_t ret_len;
+    uint32_t payload_len;
+    uint32_t addr_len;
+    uint32_t control_len;
+};
+
+#define VSOCKFS_DATA_COMPAT_OP_PRE_SEND 1
+#define VSOCKFS_DATA_COMPAT_OP_POST_RECV 2
+#define VSOCKFS_DATA_COMPAT_OP_PRE_SENDTO 3
+#define VSOCKFS_DATA_COMPAT_OP_POST_RECVFROM 4
+#define VSOCKFS_DATA_COMPAT_OP_PRE_SENDMSG 5
+#define VSOCKFS_DATA_COMPAT_OP_POST_RECVMSG 6
+#define VSOCKFS_DATA_COMPAT_NO_ERRNO INT32_MIN
+#define VSOCKFS_DATA_COMPAT_NO_RET_LEN UINT32_MAX
+
 static unsigned long sockfs_token_counter;
 
 static const char *vsockfs_dev_path(void)
@@ -3592,6 +3653,126 @@ static abi_long do_vsockfs_sync_host_state_from_carrier(int fd, int host_fd,
     sockfs_capture_host_sockaddr(host_fd, getpeername, req.peer_addr, &req.peer_addrlen);
 
     return get_errno(safe_ioctl(fd, IOCTL_VSOCKFS_ATTACH_HOST, &req));
+}
+
+static abi_long do_vsockfs_data_compat_ioctl(int fd, void *buf, size_t len)
+{
+    compat_ioctl_info_t info;
+    abi_long ret;
+    int cmd = HOST_IOC(0xA1, 's', len, HOST_IOC_READ | HOST_IOC_WRITE);
+
+    ret = get_errno(safe_ioctl(fd, cmd, buf));
+    if (ret != -EINCOMPAT) {
+        return ret;
+    }
+
+    info.cmd = cmd;
+    info.size = 0;
+    info.flags = 0;
+
+    ret = get_errno(safe_ioctl(fd, IOCTL_COMPAT_IOCTL, &info));
+    if (is_error(ret)) {
+        return ret;
+    }
+
+    ret = get_errno(safe_ioctl(fd, info.cmd, buf));
+    if (is_error(ret)) {
+        return ret;
+    }
+
+    if (info.flags & COMPAT_FLAG_FLUSH) {
+        ioctl_compat_flush(fd);
+    }
+    if (info.flags & COMPAT_FLAG_LOG) {
+        ioctl_compat_log(fd);
+    }
+
+    return ret;
+}
+
+static abi_long do_vsockfs_transform_host_data(int fd, uint32_t op,
+                                               const uint8_t *payload, size_t payload_len,
+                                               const uint8_t *addr, size_t addr_len,
+                                               const uint8_t *control, size_t control_len,
+                                               int *flags,
+                                               uint8_t **out_payload,
+                                               size_t *out_payload_len,
+                                               uint8_t **out_addr,
+                                               size_t *out_addr_len,
+                                               uint8_t **out_control,
+                                               size_t *out_control_len,
+                                               bool *has_ret_len,
+                                               size_t *ret_len_out)
+{
+    struct vsockfs_data_compat_req req_hdr = {
+        .op = op,
+        .flags = *flags,
+        .errno_value = VSOCKFS_DATA_COMPAT_NO_ERRNO,
+        .payload_len = payload_len,
+        .addr_len = addr_len,
+        .control_len = control_len,
+    };
+    struct vsockfs_data_compat_resp *resp_hdr;
+    size_t req_len = sizeof(req_hdr) + payload_len + addr_len + control_len;
+    uint8_t *compat_buf = g_malloc(req_len);
+    abi_long ret;
+    size_t payload_off = sizeof(req_hdr);
+    size_t addr_off = payload_off + payload_len;
+    size_t control_off = addr_off + addr_len;
+
+    memcpy(compat_buf, &req_hdr, sizeof(req_hdr));
+    if (payload_len > 0) {
+        memcpy(compat_buf + payload_off, payload, payload_len);
+    }
+    if (addr_len > 0) {
+        memcpy(compat_buf + addr_off, addr, addr_len);
+    }
+    if (control_len > 0) {
+        memcpy(compat_buf + control_off, control, control_len);
+    }
+
+    ret = do_vsockfs_data_compat_ioctl(fd, compat_buf, req_len);
+    if (is_error(ret)) {
+        g_free(compat_buf);
+        return ret;
+    }
+
+    if (req_len < sizeof(*resp_hdr)) {
+        g_free(compat_buf);
+        return -TARGET_EINVAL;
+    }
+
+    resp_hdr = (struct vsockfs_data_compat_resp *)compat_buf;
+    if (sizeof(*resp_hdr) + resp_hdr->payload_len + resp_hdr->addr_len +
+        resp_hdr->control_len > req_len) {
+        g_free(compat_buf);
+        return -TARGET_EINVAL;
+    }
+
+    *flags = resp_hdr->flags;
+    if (resp_hdr->errno_value != VSOCKFS_DATA_COMPAT_NO_ERRNO) {
+        ret = -host_to_target_errno(resp_hdr->errno_value);
+        g_free(compat_buf);
+        return ret;
+    }
+
+    *out_payload_len = resp_hdr->payload_len;
+    *out_addr_len = resp_hdr->addr_len;
+    *out_control_len = resp_hdr->control_len;
+    *out_payload = *out_payload_len ? g_memdup2(compat_buf + sizeof(*resp_hdr), *out_payload_len)
+                                    : NULL;
+    *out_addr = *out_addr_len
+                    ? g_memdup2(compat_buf + sizeof(*resp_hdr) + *out_payload_len, *out_addr_len)
+                    : NULL;
+    *out_control = *out_control_len
+                       ? g_memdup2(compat_buf + sizeof(*resp_hdr) + *out_payload_len +
+                                       *out_addr_len,
+                                   *out_control_len)
+                       : NULL;
+    *has_ret_len = resp_hdr->ret_len != VSOCKFS_DATA_COMPAT_NO_RET_LEN;
+    *ret_len_out = *has_ret_len ? resp_hdr->ret_len : 0;
+    g_free(compat_buf);
+    return 0;
 }
 
 static void sockfs_next_token(char *token, size_t token_len, const char *prefix)
@@ -4691,10 +4872,12 @@ static abi_long do_sendrecvmsg_locked(int fd, struct target_msghdr *msgp,
         size_t total_len;
         size_t alloc_len;
         char *flat_buf;
+        uint8_t *transformed = NULL;
         abi_long target_controllen;
         abi_ulong target_control;
         size_t control_len;
         uint8_t control_buf[VSOCKFS_MSG_CONTROL_MAX];
+        int host_fd = sockfs_carrier_hostfd(fd);
 
         if (msg.msg_name == (void *)-1) {
             ret = -TARGET_EFAULT;
@@ -4716,6 +4899,146 @@ static abi_long do_sendrecvmsg_locked(int fd, struct target_msghdr *msgp,
         total_len = iov_total_len(vec, count);
         alloc_len = MAX((size_t)1, total_len);
         flat_buf = g_malloc(alloc_len);
+
+        if (host_fd >= 0) {
+            if (send) {
+                size_t transformed_len = 0;
+                size_t transformed_addr_len = 0;
+                size_t transformed_control_len = 0;
+                size_t ret_len = 0;
+                bool has_ret_len = false;
+                int compat_flags = flags;
+                uint8_t *transformed_addr = NULL;
+                uint8_t *transformed_control = NULL;
+
+                if (msg.msg_name != NULL || control_len > 0) {
+                    ret = target_to_host_cmsg(&msg, msgp);
+                    if (ret != 0) {
+                        g_free(flat_buf);
+                        goto out;
+                    }
+                }
+                if (total_len > 0) {
+                    iov_flatten(flat_buf, vec, count);
+                }
+
+                ret = do_vsockfs_transform_host_data(fd,
+                                                     msg.msg_name != NULL || control_len > 0
+                                                         ? VSOCKFS_DATA_COMPAT_OP_PRE_SENDMSG
+                                                         : VSOCKFS_DATA_COMPAT_OP_PRE_SEND,
+                                                     (uint8_t *)flat_buf, total_len,
+                                                     (const uint8_t *)msg.msg_name,
+                                                     msg.msg_name ? msg.msg_namelen : 0,
+                                                     (const uint8_t *)msg.msg_control,
+                                                     msg.msg_controllen,
+                                                     &compat_flags, &transformed,
+                                                     &transformed_len, &transformed_addr,
+                                                     &transformed_addr_len,
+                                                     &transformed_control,
+                                                     &transformed_control_len,
+                                                     &has_ret_len, &ret_len);
+                if (is_error(ret)) {
+                    g_free(flat_buf);
+                    goto out;
+                }
+                if (msg.msg_name != NULL || control_len > 0) {
+                    msg.msg_name = transformed_addr;
+                    msg.msg_namelen = transformed_addr_len;
+                    msg.msg_control = transformed_control;
+                    msg.msg_controllen = transformed_control_len;
+                    msg.msg_iov->iov_base = transformed;
+                    msg.msg_iov->iov_len = transformed_len;
+                    ret = get_errno(safe_sendmsg(host_fd, &msg, compat_flags));
+                } else {
+                    ret = get_errno(safe_write(host_fd, transformed, transformed_len));
+                }
+                if (!is_error(ret) && has_ret_len) {
+                    ret = ret_len;
+                }
+                g_free(transformed_addr);
+                g_free(transformed_control);
+            } else {
+                size_t transformed_len = 0;
+                size_t transformed_addr_len = 0;
+                size_t transformed_control_len = 0;
+                size_t ret_len = 0;
+                bool has_ret_len = false;
+                int compat_flags = flags;
+                uint8_t *transformed_addr = NULL;
+                uint8_t *transformed_control = NULL;
+
+                if (msg.msg_name != NULL || control_len > 0) {
+                    ret = get_errno(safe_recvmsg(host_fd, &msg, flags));
+                    if (!is_error(ret)) {
+                        control_len = MIN(control_len, (size_t)msg.msg_controllen);
+                    }
+                } else {
+                    ret = get_errno(safe_read(host_fd, flat_buf, total_len));
+                }
+                if (!is_error(ret) && ret > 0) {
+                    if (msg.msg_name != NULL || control_len > 0) {
+                        iov_flatten(flat_buf, vec, count);
+                    }
+                    ret = do_vsockfs_transform_host_data(fd,
+                                                         msg.msg_name != NULL || control_len > 0
+                                                             ? VSOCKFS_DATA_COMPAT_OP_POST_RECVMSG
+                                                             : VSOCKFS_DATA_COMPAT_OP_POST_RECV,
+                                                         (uint8_t *)flat_buf, ret,
+                                                         (const uint8_t *)msg.msg_name,
+                                                         msg.msg_name ? msg.msg_namelen : 0,
+                                                         (const uint8_t *)msg.msg_control,
+                                                         msg.msg_controllen,
+                                                         &compat_flags, &transformed,
+                                                         &transformed_len, &transformed_addr,
+                                                         &transformed_addr_len,
+                                                         &transformed_control,
+                                                         &transformed_control_len,
+                                                         &has_ret_len, &ret_len);
+                    if (!is_error(ret)) {
+                        if (transformed_len > 0) {
+                            iov_scatter(vec, count, (char *)transformed, transformed_len);
+                        }
+                        msg.msg_flags = compat_flags;
+                        if (control_len > 0 || transformed_control_len > 0) {
+                            msg.msg_control = transformed_control;
+                            msg.msg_controllen = transformed_control_len;
+                            abi_long cmsg_ret = host_to_target_cmsg(msgp, &msg);
+                            if (cmsg_ret) {
+                                g_free(transformed);
+                                g_free(transformed_addr);
+                                g_free(transformed_control);
+                                g_free(flat_buf);
+                                ret = cmsg_ret;
+                                goto out;
+                            }
+                        }
+                        msgp->msg_controllen = tswapal(transformed_control_len);
+                        if (msg.msg_name != NULL || transformed_addr_len > 0) {
+                            abi_long addr_ret = host_to_target_sockaddr(tswapal(msgp->msg_name),
+                                                                        (struct sockaddr *)transformed_addr,
+                                                                        transformed_addr_len);
+                            if (addr_ret) {
+                                g_free(transformed);
+                                g_free(transformed_addr);
+                                g_free(transformed_control);
+                                g_free(flat_buf);
+                                ret = addr_ret;
+                                goto out;
+                            }
+                        }
+                        msgp->msg_namelen = tswap32(transformed_addr_len);
+                        msgp->msg_flags = tswap32(msg.msg_flags);
+                        ret = has_ret_len ? ret_len : transformed_len;
+                    }
+                }
+                g_free(transformed_addr);
+                g_free(transformed_control);
+            }
+
+            g_free(transformed);
+            g_free(flat_buf);
+            goto out;
+        }
 
         if (send) {
             if (control_len > 0) {
@@ -5083,6 +5406,61 @@ static abi_long do_sendto(int fd, abi_ulong msg, size_t len, int flags,
     if (!host_msg)
         return -TARGET_EFAULT;
     if (sockfs_fd_p(fd)) {
+        int host_fd = sockfs_carrier_hostfd(fd);
+
+        if (host_fd >= 0) {
+            uint8_t *transformed = NULL;
+            uint8_t *transformed_addr = NULL;
+            uint8_t *transformed_control = NULL;
+            size_t transformed_len = 0;
+            size_t transformed_addr_len = 0;
+            size_t transformed_control_len = 0;
+            size_t ret_len = 0;
+            bool has_ret_len = false;
+            int compat_flags = flags;
+
+            if (target_addr) {
+                addr = alloca(addrlen + 1);
+                ret = target_to_host_sockaddr(fd, addr, target_addr, addrlen);
+                if (ret) {
+                    goto fail;
+                }
+            } else {
+                addr = NULL;
+            }
+            ret = do_vsockfs_transform_host_data(fd,
+                                                 target_addr
+                                                     ? VSOCKFS_DATA_COMPAT_OP_PRE_SENDTO
+                                                     : VSOCKFS_DATA_COMPAT_OP_PRE_SEND,
+                                                 host_msg, len,
+                                                 addr, target_addr ? addrlen : 0,
+                                                 NULL, 0,
+                                                 &compat_flags,
+                                                 &transformed, &transformed_len,
+                                                 &transformed_addr, &transformed_addr_len,
+                                                 &transformed_control,
+                                                 &transformed_control_len,
+                                                 &has_ret_len, &ret_len);
+            if (is_error(ret)) {
+                goto fail;
+            }
+            if (target_addr) {
+                ret = get_errno(safe_sendto(host_fd, transformed, transformed_len,
+                                            compat_flags,
+                                            (const struct sockaddr *)transformed_addr,
+                                            transformed_addr_len));
+            } else {
+                ret = get_errno(safe_write(host_fd, transformed, transformed_len));
+            }
+            if (!is_error(ret) && has_ret_len) {
+                ret = ret_len;
+            }
+            g_free(transformed);
+            g_free(transformed_addr);
+            g_free(transformed_control);
+            goto fail;
+        }
+
         if (target_addr) {
             addr = alloca(addrlen + 1);
             ret = target_to_host_sockaddr(fd, addr, target_addr, addrlen);
@@ -5153,7 +5531,57 @@ static abi_long do_recvfrom(int fd, abi_ulong msg, size_t len, int flags,
         addr = alloca(addrlen);
         ret_addrlen = addrlen;
         if (sockfs_fd_p(fd)) {
-            ret = do_vsockfs_recvfrom(fd, host_msg, len, flags, addr, &ret_addrlen);
+            int host_fd = sockfs_carrier_hostfd(fd);
+
+            if (host_fd >= 0) {
+                ret = get_errno(safe_recvfrom(host_fd, host_msg, len, flags,
+                                              addr, &ret_addrlen));
+                if (!is_error(ret) && ret > 0) {
+                    uint8_t *transformed = NULL;
+                    uint8_t *transformed_addr = NULL;
+                    uint8_t *transformed_control = NULL;
+                    size_t transformed_len = 0;
+                    size_t transformed_addr_len = 0;
+                    size_t transformed_control_len = 0;
+                    size_t ret_len = 0;
+                    bool has_ret_len = false;
+                    int compat_flags = flags;
+                    abi_long compat_ret =
+                        do_vsockfs_transform_host_data(fd,
+                                                       VSOCKFS_DATA_COMPAT_OP_POST_RECVFROM,
+                                                       host_msg, ret,
+                                                       addr, ret_addrlen,
+                                                       NULL, 0,
+                                                       &compat_flags,
+                                                       &transformed,
+                                                       &transformed_len,
+                                                       &transformed_addr,
+                                                       &transformed_addr_len,
+                                                       &transformed_control,
+                                                       &transformed_control_len,
+                                                       &has_ret_len, &ret_len);
+                    if (is_error(compat_ret)) {
+                        ret = compat_ret;
+                    } else {
+                        size_t copy_len = MIN(transformed_len, len);
+
+                        if (copy_len > 0 && host_msg != NULL) {
+                            memcpy(host_msg, transformed, copy_len);
+                        }
+                        if (transformed_addr_len > 0) {
+                            memcpy(addr, transformed_addr,
+                                   MIN((size_t)ret_addrlen, transformed_addr_len));
+                            ret_addrlen = transformed_addr_len;
+                        }
+                        ret = has_ret_len ? ret_len : copy_len;
+                    }
+                    g_free(transformed);
+                    g_free(transformed_addr);
+                    g_free(transformed_control);
+                }
+            } else {
+                ret = do_vsockfs_recvfrom(fd, host_msg, len, flags, addr, &ret_addrlen);
+            }
         } else {
             ret = get_errno(safe_recvfrom(fd, host_msg, len, flags,
                                           addr, &ret_addrlen));
@@ -5162,7 +5590,51 @@ static abi_long do_recvfrom(int fd, abi_ulong msg, size_t len, int flags,
         addr = NULL; /* To keep compiler quiet.  */
         addrlen = 0; /* To keep compiler quiet.  */
         if (sockfs_fd_p(fd)) {
-            ret = get_errno(safe_read(fd, host_msg, len));
+            int host_fd = sockfs_carrier_hostfd(fd);
+
+            if (host_fd >= 0) {
+                ret = get_errno(safe_read(host_fd, host_msg, len));
+                if (!is_error(ret) && ret > 0) {
+                    uint8_t *transformed = NULL;
+                    uint8_t *transformed_addr = NULL;
+                    uint8_t *transformed_control = NULL;
+                    size_t transformed_len = 0;
+                    size_t transformed_addr_len = 0;
+                    size_t transformed_control_len = 0;
+                    size_t ret_len = 0;
+                    bool has_ret_len = false;
+                    int compat_flags = flags;
+                    abi_long compat_ret =
+                        do_vsockfs_transform_host_data(fd,
+                                                       VSOCKFS_DATA_COMPAT_OP_POST_RECV,
+                                                       host_msg, ret,
+                                                       NULL, 0,
+                                                       NULL, 0,
+                                                       &compat_flags,
+                                                       &transformed,
+                                                       &transformed_len,
+                                                       &transformed_addr,
+                                                       &transformed_addr_len,
+                                                       &transformed_control,
+                                                       &transformed_control_len,
+                                                       &has_ret_len, &ret_len);
+                    if (is_error(compat_ret)) {
+                        ret = compat_ret;
+                    } else {
+                        size_t copy_len = MIN(transformed_len, len);
+
+                        if (copy_len > 0 && host_msg != NULL) {
+                            memcpy(host_msg, transformed, copy_len);
+                        }
+                        ret = has_ret_len ? ret_len : copy_len;
+                    }
+                    g_free(transformed);
+                    g_free(transformed_addr);
+                    g_free(transformed_control);
+                }
+            } else {
+                ret = get_errno(safe_read(fd, host_msg, len));
+            }
         } else {
             ret = get_errno(safe_recvfrom(fd, host_msg, len, flags, NULL, 0));
         }
@@ -11488,6 +11960,55 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         } else {
             if (!(p = lock_user(VERIFY_WRITE, arg2, arg3, 0)))
                 return -TARGET_EFAULT;
+#ifndef NO_EMU_HOOKS
+            if (sockfs_fd_p(arg1)) {
+                int host_fd = sockfs_carrier_hostfd(arg1);
+
+                if (host_fd >= 0) {
+                    ret = get_errno(safe_read(host_fd, p, arg3));
+                    if (ret > 0) {
+                        uint8_t *transformed = NULL;
+                        uint8_t *transformed_addr = NULL;
+                        uint8_t *transformed_control = NULL;
+                        size_t transformed_len = 0;
+                        size_t transformed_addr_len = 0;
+                        size_t transformed_control_len = 0;
+                        size_t ret_len = 0;
+                        bool has_ret_len = false;
+                        int compat_flags = 0;
+                        abi_long compat_ret =
+                            do_vsockfs_transform_host_data(arg1,
+                                                           VSOCKFS_DATA_COMPAT_OP_POST_RECV,
+                                                           p, ret,
+                                                           NULL, 0,
+                                                           NULL, 0,
+                                                           &compat_flags,
+                                                           &transformed,
+                                                           &transformed_len,
+                                                           &transformed_addr,
+                                                           &transformed_addr_len,
+                                                           &transformed_control,
+                                                           &transformed_control_len,
+                                                           &has_ret_len, &ret_len);
+                        if (is_error(compat_ret)) {
+                            ret = compat_ret;
+                        } else {
+                            size_t copy_len = MIN(transformed_len, (size_t)arg3);
+
+                            if (copy_len > 0) {
+                                memcpy(p, transformed, copy_len);
+                            }
+                            ret = has_ret_len ? ret_len : copy_len;
+                        }
+                        g_free(transformed);
+                        g_free(transformed_addr);
+                        g_free(transformed_control);
+                    }
+                    unlock_user(p, arg2, ret);
+                    return ret;
+                }
+            }
+#endif
             ret = get_errno(safe_read(arg1, p, arg3));
             if (ret >= 0 &&
                 fd_trans_host_to_target_data(arg1)) {
@@ -11507,6 +12028,53 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         }
         if (!(p = lock_user(VERIFY_READ, arg2, arg3, 1)))
             return -TARGET_EFAULT;
+#ifndef NO_EMU_HOOKS
+        if (sockfs_fd_p(arg1)) {
+            int host_fd = sockfs_carrier_hostfd(arg1);
+
+            if (host_fd >= 0) {
+                uint8_t *transformed = NULL;
+                uint8_t *transformed_addr = NULL;
+                uint8_t *transformed_control = NULL;
+                size_t transformed_len = 0;
+                size_t transformed_addr_len = 0;
+                size_t transformed_control_len = 0;
+                size_t ret_len = 0;
+                bool has_ret_len = false;
+                int compat_flags = 0;
+                abi_long compat_ret =
+                    do_vsockfs_transform_host_data(arg1,
+                                                   VSOCKFS_DATA_COMPAT_OP_PRE_SEND,
+                                                   p, arg3,
+                                                   NULL, 0,
+                                                   NULL, 0,
+                                                   &compat_flags,
+                                                   &transformed,
+                                                   &transformed_len,
+                                                   &transformed_addr,
+                                                   &transformed_addr_len,
+                                                   &transformed_control,
+                                                   &transformed_control_len,
+                                                   &has_ret_len, &ret_len);
+                if (is_error(compat_ret)) {
+                    ret = compat_ret;
+                } else {
+                    ret = get_errno(safe_write(host_fd, transformed, transformed_len));
+                    if (!is_error(ret) && has_ret_len) {
+                        ret = ret_len;
+                    }
+#ifndef NO_EMU_HOOKS
+                    dump_write(arg1, (const char *)transformed, transformed_len);
+#endif
+                }
+                g_free(transformed);
+                g_free(transformed_addr);
+                g_free(transformed_control);
+                unlock_user(p, arg2, 0);
+                return ret;
+            }
+        }
+#endif
         if (fd_trans_target_to_host_data(arg1)) {
             void *copy = g_malloc(arg3);
             memcpy(copy, p, arg3);
