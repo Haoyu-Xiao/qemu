@@ -3579,8 +3579,8 @@ static void sockfs_capture_host_sockaddr(int host_fd,
     }
 }
 
-static abi_long do_vsockfs_attach_host_state(int fd, int host_fd,
-                                             uint32_t state, uint32_t backlog)
+static abi_long do_vsockfs_sync_host_state_from_carrier(int fd, int host_fd,
+                                                        uint32_t state, uint32_t backlog)
 {
     struct vsockfs_host_attach req = { 0 };
 
@@ -3777,14 +3777,19 @@ static abi_long do_vsockfs_listen(int fd, int backlog)
     int host_fd = sockfs_carrier_hostfd(fd);
 
     if (host_fd >= 0) {
+        /*
+         * For host-backed sockfs objects the kernel listener state is owned by
+         * the QEMU-user process. vsockfs only mirrors the guest-visible socket
+         * object after this real host listen succeeds.
+         */
         abi_long ret = get_errno(listen(host_fd, backlog));
 
         if (is_error(ret)) {
             return ret;
         }
-        return do_vsockfs_attach_host_state(fd, host_fd,
-                                            VSOCKFS_SOCKET_LISTENING,
-                                            backlog);
+        return do_vsockfs_sync_host_state_from_carrier(fd, host_fd,
+                                                       VSOCKFS_SOCKET_LISTENING,
+                                                       backlog);
     }
 
     return get_errno(safe_ioctl(fd, IOCTL_VSOCKFS_LISTEN, backlog));
@@ -4191,6 +4196,12 @@ static abi_long do_vsockfs_accept4(int listener_fd, abi_ulong target_addr,
             ret_addrlen = addrlen;
         }
 
+        /*
+         * Host-backed accept is a split operation:
+         *   1. QEMU-user accepts on the real host listener fd.
+         *   2. vsockfs materializes a new guest-visible accepted socket object.
+         *   3. The accepted host carrier is attached back to that object.
+         */
         accepted_host_fd = get_errno(safe_accept4(listener_host_fd, addr,
                                                   target_addr ? &ret_addrlen : NULL,
                                                   host_flags));
@@ -4204,8 +4215,8 @@ static abi_long do_vsockfs_accept4(int listener_fd, abi_ulong target_addr,
             return ret;
         }
 
-        attach_ret = do_vsockfs_attach_host_state(ret, accepted_host_fd,
-                                                  VSOCKFS_SOCKET_CONNECTED, 0);
+        attach_ret = do_vsockfs_sync_host_state_from_carrier(ret, accepted_host_fd,
+                                                             VSOCKFS_SOCKET_CONNECTED, 0);
         if (is_error(attach_ret)) {
             close(accepted_host_fd);
             close(ret);
@@ -4275,8 +4286,8 @@ static abi_long do_vsockfs_socket(int domain, int type, int protocol, int target
     }
 
     {
-        abi_long attach_ret = do_vsockfs_attach_host_state(ret, host_fd,
-                                                           VSOCKFS_SOCKET_CREATED, 0);
+        abi_long attach_ret = do_vsockfs_sync_host_state_from_carrier(ret, host_fd,
+                                                                      VSOCKFS_SOCKET_CREATED, 0);
         if (is_error(attach_ret)) {
             close(host_fd);
             close(ret);
@@ -4421,8 +4432,12 @@ static abi_long do_bind(int sockfd, abi_ulong target_addr,
             if (is_error(ret)) {
                 return ret;
             }
-            return do_vsockfs_attach_host_state(sockfd, host_fd,
-                                                VSOCKFS_SOCKET_BOUND, 0);
+            /*
+             * Host-backed bind executes in QEMU-user on the hidden carrier fd.
+             * vsockfs only mirrors the resulting guest-visible metadata.
+             */
+            return do_vsockfs_sync_host_state_from_carrier(sockfd, host_fd,
+                                                           VSOCKFS_SOCKET_BOUND, 0);
         }
         return do_vsockfs_sockaddr_ioctl(sockfd, IOCTL_VSOCKFS_BIND, addr, &addrlen, false);
     }
@@ -4563,8 +4578,12 @@ static abi_long do_connect(int sockfd, abi_ulong target_addr,
             if (is_error(ret)) {
                 return ret;
             }
-            return do_vsockfs_attach_host_state(sockfd, host_fd,
-                                                VSOCKFS_SOCKET_CONNECTED, 0);
+            /*
+             * Host-backed connect executes in QEMU-user on the hidden carrier fd.
+             * vsockfs only mirrors the resulting guest-visible metadata.
+             */
+            return do_vsockfs_sync_host_state_from_carrier(sockfd, host_fd,
+                                                           VSOCKFS_SOCKET_CONNECTED, 0);
         }
         return do_vsockfs_sockaddr_ioctl(sockfd, IOCTL_VSOCKFS_CONNECT, addr, &addrlen, false);
     }
@@ -5036,6 +5055,7 @@ static abi_long do_socketpair(int domain, int type, int protocol,
 #else
     int tab[2];
     abi_long ret;
+    (void)target_type;
     ret = get_errno(socketpair(domain, type, protocol, tab));
     if (!is_error(ret)) {
         if (put_user_s32(tab[0], target_tab_addr)
