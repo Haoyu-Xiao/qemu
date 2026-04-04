@@ -21,6 +21,7 @@
 #define USER_IOCTL_COMPAT_H
 
 #include "qemu/osdep.h"
+#include <sys/ioctl.h>
 #include "user/thunk.h"
 
 // Assume host is x86_64 Linux
@@ -51,6 +52,83 @@
 
 #define host_ioc_dir(cmd)   (((cmd) >> HOST_IOC_DIRSHIFT) & (HOST_IOC_WRITE | HOST_IOC_READ))
 #define host_ioc_size(cmd)  (((cmd) >> HOST_IOC_SIZESHIFT) & HOST_IOC_SIZEMASK)
+
+static inline bool ioctl_cmd_is_virtual_console_cmd(int cmd) {
+    /*
+     * Keep these comparisons in C rather than in #if expressions: some target
+     * ioctl macros expand through sizeof(...) or host aliases like FIONREAD.
+     * Compare on the 32-bit ioctl payload so wider target constants don't
+     * trigger signed-range warnings on hosts where they materialize as ulong.
+     */
+    uint32_t target_cmd = (uint32_t)cmd;
+
+#ifdef TARGET_TCGETS
+    if (target_cmd == (uint32_t)TARGET_TCGETS) {
+        return true;
+    }
+#endif
+#ifdef TARGET_TCSETS
+    if (target_cmd == (uint32_t)TARGET_TCSETS) {
+        return true;
+    }
+#endif
+#ifdef TARGET_TCSETSW
+    if (target_cmd == (uint32_t)TARGET_TCSETSW) {
+        return true;
+    }
+#endif
+#ifdef TARGET_TCSETSF
+    if (target_cmd == (uint32_t)TARGET_TCSETSF) {
+        return true;
+    }
+#endif
+#ifdef TARGET_TIOCGWINSZ
+    if (target_cmd == (uint32_t)TARGET_TIOCGWINSZ) {
+        return true;
+    }
+#endif
+#ifdef TARGET_TIOCSWINSZ
+    if (target_cmd == (uint32_t)TARGET_TIOCSWINSZ) {
+        return true;
+    }
+#endif
+#ifdef TARGET_TIOCGPGRP
+    if (target_cmd == (uint32_t)TARGET_TIOCGPGRP) {
+        return true;
+    }
+#endif
+#ifdef TARGET_TIOCSPGRP
+    if (target_cmd == (uint32_t)TARGET_TIOCSPGRP) {
+        return true;
+    }
+#endif
+#ifdef TARGET_FIONREAD
+    if (target_cmd == (uint32_t)TARGET_FIONREAD) {
+        return true;
+    }
+#endif
+#ifdef TARGET_TIOCINQ
+    if (target_cmd == (uint32_t)TARGET_TIOCINQ) {
+        return true;
+    }
+#endif
+#ifdef TARGET_TIOCOUTQ
+    if (target_cmd == (uint32_t)TARGET_TIOCOUTQ) {
+        return true;
+    }
+#endif
+#ifdef TARGET_TIOCSCTTY
+    if (target_cmd == (uint32_t)TARGET_TIOCSCTTY) {
+        return true;
+    }
+#endif
+#ifdef TARGET_TIOCNOTTY
+    if (target_cmd == (uint32_t)TARGET_TIOCNOTTY) {
+        return true;
+    }
+#endif
+    return false;
+}
 
 static inline bool ioctl_cmd_may_conflict(int cmd) {
     return !(cmd & (~HOST_IOC_NRMASK));

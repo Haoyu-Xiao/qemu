@@ -1187,6 +1187,102 @@ static inline abi_long copy_to_user_fdset(abi_ulong target_fds_addr,
 
     return 0;
 }
+
+#ifndef NO_EMU_HOOKS
+static int *sockfs_select_fd_map_new(int n)
+{
+    int *fd_map;
+    int i;
+
+    fd_map = g_new(int, n);
+    for (i = 0; i < n; i++) {
+        fd_map[i] = -1;
+    }
+    return fd_map;
+}
+
+static void sockfs_select_prepare_fdset(fd_set *fds, const fd_set *requested,
+                                        int n, int *fd_map, int *mapped_n)
+{
+    int fd;
+
+    if (!fds || !requested) {
+        return;
+    }
+
+    for (fd = 0; fd < n; fd++) {
+        int host_fd;
+
+        if (!FD_ISSET(fd, requested) || !sockfs_fd_p(fd)) {
+            continue;
+        }
+
+        if (fd_map[fd] >= 0) {
+            host_fd = fd_map[fd];
+        } else {
+            host_fd = sockfs_carrier_hostfd(fd);
+            fd_map[fd] = host_fd;
+        }
+
+        if (host_fd < 0) {
+            continue;
+        }
+
+        FD_CLR(fd, fds);
+        FD_SET(host_fd, fds);
+        if (host_fd + 1 > *mapped_n) {
+            *mapped_n = host_fd + 1;
+        }
+    }
+}
+
+static void sockfs_select_restore_fdset(fd_set *fds, const fd_set *requested,
+                                        int n, const int *fd_map)
+{
+    fd_set translated;
+    int fd;
+
+    if (!fds || !requested) {
+        return;
+    }
+
+    FD_ZERO(&translated);
+    for (fd = 0; fd < n; fd++) {
+        int mapped_fd = fd_map[fd];
+
+        if (!FD_ISSET(fd, requested)) {
+            continue;
+        }
+
+        if (mapped_fd >= 0) {
+            if (FD_ISSET(mapped_fd, fds)) {
+                FD_SET(fd, &translated);
+            }
+        } else if (FD_ISSET(fd, fds)) {
+            FD_SET(fd, &translated);
+        }
+    }
+
+    *fds = translated;
+}
+
+static int sockfs_select_ready_count(const fd_set *rfds, const fd_set *wfds,
+                                     const fd_set *efds, int n)
+{
+    int fd;
+    int count = 0;
+
+    for (fd = 0; fd < n; fd++) {
+        if ((rfds && FD_ISSET(fd, rfds)) ||
+            (wfds && FD_ISSET(fd, wfds)) ||
+            (efds && FD_ISSET(fd, efds))) {
+            count++;
+        }
+    }
+
+    return count;
+}
+#endif
 #endif
 
 #if defined(__alpha__)
@@ -1547,10 +1643,15 @@ static abi_long do_select(int n,
                           abi_ulong efd_addr, abi_ulong target_tv_addr)
 {
     fd_set rfds, wfds, efds;
+    fd_set orig_rfds, orig_wfds, orig_efds;
     fd_set *rfds_ptr, *wfds_ptr, *efds_ptr;
     struct timeval tv;
     struct timespec ts, *ts_ptr;
     abi_long ret;
+    int mapped_n = n;
+#ifndef NO_EMU_HOOKS
+    int *sockfs_fd_map = NULL;
+#endif
 
     ret = copy_from_user_fdset_ptr(&rfds, &rfds_ptr, rfd_addr, n);
     if (ret) {
@@ -1575,26 +1676,63 @@ static abi_long do_select(int n,
         ts_ptr = NULL;
     }
 
-    ret = get_errno(safe_pselect6(n, rfds_ptr, wfds_ptr, efds_ptr,
+#ifndef NO_EMU_HOOKS
+    if (rfds_ptr) {
+        orig_rfds = rfds;
+    }
+    if (wfds_ptr) {
+        orig_wfds = wfds;
+    }
+    if (efds_ptr) {
+        orig_efds = efds;
+    }
+
+    sockfs_fd_map = sockfs_select_fd_map_new(n);
+    sockfs_select_prepare_fdset(rfds_ptr, rfds_ptr ? &orig_rfds : NULL,
+                                n, sockfs_fd_map, &mapped_n);
+    sockfs_select_prepare_fdset(wfds_ptr, wfds_ptr ? &orig_wfds : NULL,
+                                n, sockfs_fd_map, &mapped_n);
+    sockfs_select_prepare_fdset(efds_ptr, efds_ptr ? &orig_efds : NULL,
+                                n, sockfs_fd_map, &mapped_n);
+#endif
+
+    ret = get_errno(safe_pselect6(mapped_n, rfds_ptr, wfds_ptr, efds_ptr,
                                   ts_ptr, NULL));
 
     if (!is_error(ret)) {
-        if (rfd_addr && copy_to_user_fdset(rfd_addr, &rfds, n))
-            return -TARGET_EFAULT;
-        if (wfd_addr && copy_to_user_fdset(wfd_addr, &wfds, n))
-            return -TARGET_EFAULT;
-        if (efd_addr && copy_to_user_fdset(efd_addr, &efds, n))
-            return -TARGET_EFAULT;
+#ifndef NO_EMU_HOOKS
+        sockfs_select_restore_fdset(rfds_ptr, rfds_ptr ? &orig_rfds : NULL, n, sockfs_fd_map);
+        sockfs_select_restore_fdset(wfds_ptr, wfds_ptr ? &orig_wfds : NULL, n, sockfs_fd_map);
+        sockfs_select_restore_fdset(efds_ptr, efds_ptr ? &orig_efds : NULL, n, sockfs_fd_map);
+        ret = sockfs_select_ready_count(rfds_ptr, wfds_ptr, efds_ptr, n);
+#endif
+        if (rfd_addr && copy_to_user_fdset(rfd_addr, &rfds, n)) {
+            ret = -TARGET_EFAULT;
+            goto out;
+        }
+        if (wfd_addr && copy_to_user_fdset(wfd_addr, &wfds, n)) {
+            ret = -TARGET_EFAULT;
+            goto out;
+        }
+        if (efd_addr && copy_to_user_fdset(efd_addr, &efds, n)) {
+            ret = -TARGET_EFAULT;
+            goto out;
+        }
 
         if (target_tv_addr) {
             tv.tv_sec = ts.tv_sec;
             tv.tv_usec = ts.tv_nsec / 1000;
             if (copy_to_user_timeval(target_tv_addr, &tv)) {
-                return -TARGET_EFAULT;
+                ret = -TARGET_EFAULT;
+                goto out;
             }
         }
     }
 
+out:
+#ifndef NO_EMU_HOOKS
+    g_free(sockfs_fd_map);
+#endif
     return ret;
 }
 
@@ -1629,9 +1767,14 @@ static abi_long do_pselect6(abi_long arg1, abi_long arg2, abi_long arg3,
 {
     abi_long rfd_addr, wfd_addr, efd_addr, n, ts_addr;
     fd_set rfds, wfds, efds;
+    fd_set orig_rfds, orig_wfds, orig_efds;
     fd_set *rfds_ptr, *wfds_ptr, *efds_ptr;
     struct timespec ts, *ts_ptr;
     abi_long ret;
+    int mapped_n;
+#ifndef NO_EMU_HOOKS
+    int *sockfs_fd_map = NULL;
+#endif
 
     /*
      * The 6th arg is actually two args smashed together,
@@ -1649,6 +1792,7 @@ static abi_long do_pselect6(abi_long arg1, abi_long arg2, abi_long arg3,
     wfd_addr = arg3;
     efd_addr = arg4;
     ts_addr = arg5;
+    mapped_n = n;
 
     ret = copy_from_user_fdset_ptr(&rfds, &rfds_ptr, rfd_addr, n);
     if (ret) {
@@ -1677,7 +1821,7 @@ static abi_long do_pselect6(abi_long arg1, abi_long arg2, abi_long arg3,
                 return -TARGET_EFAULT;
             }
         }
-            ts_ptr = &ts;
+        ts_ptr = &ts;
     } else {
         ts_ptr = NULL;
     }
@@ -1703,7 +1847,27 @@ static abi_long do_pselect6(abi_long arg1, abi_long arg2, abi_long arg3,
         }
     }
 
-    ret = get_errno(safe_pselect6(n, rfds_ptr, wfds_ptr, efds_ptr,
+#ifndef NO_EMU_HOOKS
+    if (rfds_ptr) {
+        orig_rfds = rfds;
+    }
+    if (wfds_ptr) {
+        orig_wfds = wfds;
+    }
+    if (efds_ptr) {
+        orig_efds = efds;
+    }
+
+    sockfs_fd_map = sockfs_select_fd_map_new(n);
+    sockfs_select_prepare_fdset(rfds_ptr, rfds_ptr ? &orig_rfds : NULL,
+                                n, sockfs_fd_map, &mapped_n);
+    sockfs_select_prepare_fdset(wfds_ptr, wfds_ptr ? &orig_wfds : NULL,
+                                n, sockfs_fd_map, &mapped_n);
+    sockfs_select_prepare_fdset(efds_ptr, efds_ptr ? &orig_efds : NULL,
+                                n, sockfs_fd_map, &mapped_n);
+#endif
+
+    ret = get_errno(safe_pselect6(mapped_n, rfds_ptr, wfds_ptr, efds_ptr,
                                   ts_ptr, sig_ptr));
 
     if (sig_ptr) {
@@ -1711,25 +1875,44 @@ static abi_long do_pselect6(abi_long arg1, abi_long arg2, abi_long arg3,
     }
 
     if (!is_error(ret)) {
+#ifndef NO_EMU_HOOKS
+        sockfs_select_restore_fdset(rfds_ptr, rfds_ptr ? &orig_rfds : NULL,
+                                    n, sockfs_fd_map);
+        sockfs_select_restore_fdset(wfds_ptr, wfds_ptr ? &orig_wfds : NULL,
+                                    n, sockfs_fd_map);
+        sockfs_select_restore_fdset(efds_ptr, efds_ptr ? &orig_efds : NULL,
+                                    n, sockfs_fd_map);
+        ret = sockfs_select_ready_count(rfds_ptr, wfds_ptr, efds_ptr, n);
+#endif
         if (rfd_addr && copy_to_user_fdset(rfd_addr, &rfds, n)) {
-            return -TARGET_EFAULT;
+            ret = -TARGET_EFAULT;
+            goto out;
         }
         if (wfd_addr && copy_to_user_fdset(wfd_addr, &wfds, n)) {
-            return -TARGET_EFAULT;
+            ret = -TARGET_EFAULT;
+            goto out;
         }
         if (efd_addr && copy_to_user_fdset(efd_addr, &efds, n)) {
-            return -TARGET_EFAULT;
+            ret = -TARGET_EFAULT;
+            goto out;
         }
         if (time64) {
             if (ts_addr && host_to_target_timespec64(ts_addr, &ts)) {
-                return -TARGET_EFAULT;
+                ret = -TARGET_EFAULT;
+                goto out;
             }
         } else {
             if (ts_addr && host_to_target_timespec(ts_addr, &ts)) {
-                return -TARGET_EFAULT;
+                ret = -TARGET_EFAULT;
+                goto out;
             }
         }
     }
+
+out:
+#ifndef NO_EMU_HOOKS
+    g_free(sockfs_fd_map);
+#endif
     return ret;
 }
 #endif
@@ -4487,7 +4670,6 @@ static abi_long do_socket(int domain, int type, int protocol)
 {
     int target_type = type;
     int ret;
-    bool force_vsockfs = false;
 
     ret = target_to_host_sock_type(&type);
     if (ret) {
@@ -4500,11 +4682,7 @@ static abi_long do_socket(int domain, int type, int protocol)
 #endif
          protocol == NETLINK_KOBJECT_UEVENT ||
          protocol == NETLINK_AUDIT)) {
-#ifndef NO_EMU_HOOKS
-        force_vsockfs = true;
-#else
         return -TARGET_EPROTONOSUPPORT;
-#endif
     }
 
 #ifndef NO_EMU_HOOKS
@@ -4520,16 +4698,8 @@ static abi_long do_socket(int domain, int type, int protocol)
         protocol = tswap16(protocol);
     }
 
-    if (force_vsockfs) {
 #ifndef NO_EMU_HOOKS
-        return do_vsockfs_socket(domain, type, protocol, target_type);
-#else
-        return -TARGET_EPROTONOSUPPORT;
-#endif
-    }
-
-#ifndef NO_EMU_HOOKS
-    return do_vsockfs_socket(domain, type, protocol, target_type);
+    ret = do_vsockfs_socket(domain, type, protocol, target_type);
 #else
     ret = get_errno(socket(domain, type, protocol));
     if (ret >= 0) {
@@ -5312,7 +5482,14 @@ static abi_long do_getpeername(int fd, abi_ulong target_addr,
     ret_addrlen = addrlen;
 #ifndef NO_EMU_HOOKS
     if (sockfs_fd_p(fd)) {
-        ret = do_vsockfs_sockaddr_ioctl(fd, IOCTL_VSOCKFS_GETPEERNAME, addr, &ret_addrlen, true);
+        int host_fd = sockfs_carrier_hostfd(fd);
+
+        if (host_fd >= 0) {
+            ret = get_errno(getpeername(host_fd, addr, &ret_addrlen));
+        } else {
+            ret = do_vsockfs_sockaddr_ioctl(fd, IOCTL_VSOCKFS_GETPEERNAME,
+                                            addr, &ret_addrlen, true);
+        }
     } else
 #endif
     {
@@ -5351,7 +5528,14 @@ static abi_long do_getsockname(int fd, abi_ulong target_addr,
     ret_addrlen = addrlen;
 #ifndef NO_EMU_HOOKS
     if (sockfs_fd_p(fd)) {
-        ret = do_vsockfs_sockaddr_ioctl(fd, IOCTL_VSOCKFS_GETSOCKNAME, addr, &ret_addrlen, true);
+        int host_fd = sockfs_carrier_hostfd(fd);
+
+        if (host_fd >= 0) {
+            ret = get_errno(getsockname(host_fd, addr, &ret_addrlen));
+        } else {
+            ret = do_vsockfs_sockaddr_ioctl(fd, IOCTL_VSOCKFS_GETSOCKNAME,
+                                            addr, &ret_addrlen, true);
+        }
     } else
 #endif
     {
@@ -7804,6 +7988,12 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
     int target_size;
     void *argptr;
 
+#ifndef NO_EMU_HOOKS
+    if (ioctl_cmd_is_virtual_console_cmd(cmd)) {
+        return do_compat_ioctl(fd, cmd, arg);
+    }
+#endif
+
     ie = ioctl_entries;
     for(;;) {
         // HACK: always pass through FIBMAP, FIGETBSZ for compatibility with some nvram
@@ -9479,6 +9669,16 @@ static abi_long do_fcntl(int fd, int cmd, abi_ulong arg)
         ret = get_errno(safe_fcntl(fd, host_cmd,
                                    target_to_host_bitmask(arg,
                                                           fcntl_flags_tbl)));
+        break;
+
+    case TARGET_F_DUPFD:
+#ifdef F_DUPFD_CLOEXEC
+    case TARGET_F_DUPFD_CLOEXEC:
+#endif
+        ret = get_errno(safe_fcntl(fd, host_cmd, arg));
+        if (ret >= 0) {
+            fd_trans_dup(fd, ret);
+        }
         break;
 
 #ifdef F_GETOWN_EX
