@@ -7966,6 +7966,51 @@ static abi_long do_compat_ioctl_socket(const IOCTLEntry *ie, uint8_t *buf_temp,
 }
 #endif
 
+#ifndef NO_EMU_HOOKS
+static bool sockfs_ioctl_passthrough_allowed(int cmd)
+{
+    switch (cmd) {
+    case TARGET_SIOCGIFNAME:
+    case TARGET_SIOCGIFFLAGS:
+    case TARGET_SIOCGIFADDR:
+    case TARGET_SIOCGIFBRDADDR:
+    case TARGET_SIOCGIFDSTADDR:
+    case TARGET_SIOCGIFNETMASK:
+    case TARGET_SIOCGIFHWADDR:
+    case TARGET_SIOCGIFTXQLEN:
+    case TARGET_SIOCGIFMETRIC:
+    case TARGET_SIOCGIFMTU:
+    case TARGET_SIOCGIFMAP:
+    case TARGET_SIOCGIFSLAVE:
+    case TARGET_SIOCGIFMEM:
+    case TARGET_SIOCGIFINDEX:
+    case TARGET_SIOCGIFPFLAGS:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static abi_long sockfs_maybe_passthrough_ioctl_error(int fd, int target_cmd,
+                                                     int host_cmd, abi_long ret,
+                                                     void *arg)
+{
+    int host_fd;
+
+    if (ret != -TARGET_EOPNOTSUPP || !sockfs_fd_p(fd) ||
+        !sockfs_ioctl_passthrough_allowed(target_cmd)) {
+        return ret;
+    }
+
+    host_fd = sockfs_carrier_hostfd(fd);
+    if (host_fd < 0) {
+        return ret;
+    }
+
+    return get_errno(safe_ioctl(host_fd, host_cmd, arg));
+}
+#endif
+
 IOCTLEntry ioctl_entries[] = {
 #define IOCTL(cmd, access, ...) \
     { TARGET_ ## cmd, cmd, #cmd, access, 0, {  __VA_ARGS__ } },
@@ -8046,6 +8091,9 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
         switch(ie->access) {
         case IOC_R:
             ret = get_errno(safe_ioctl(fd, ie->host_cmd, buf_temp));
+#ifndef NO_EMU_HOOKS
+            ret = sockfs_maybe_passthrough_ioctl_error(fd, cmd, ie->host_cmd, ret, buf_temp);
+#endif
             if (!is_error(ret)) {
                 argptr = lock_user(VERIFY_WRITE, arg, target_size, 0);
                 if (!argptr)
@@ -8061,6 +8109,9 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
             thunk_convert(buf_temp, argptr, arg_type, THUNK_HOST);
             unlock_user(argptr, arg, 0);
             ret = get_errno(safe_ioctl(fd, ie->host_cmd, buf_temp));
+#ifndef NO_EMU_HOOKS
+            ret = sockfs_maybe_passthrough_ioctl_error(fd, cmd, ie->host_cmd, ret, buf_temp);
+#endif
             break;
         default:
         case IOC_RW:
@@ -8070,6 +8121,9 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
             thunk_convert(buf_temp, argptr, arg_type, THUNK_HOST);
             unlock_user(argptr, arg, 0);
             ret = get_errno(safe_ioctl(fd, ie->host_cmd, buf_temp));
+#ifndef NO_EMU_HOOKS
+            ret = sockfs_maybe_passthrough_ioctl_error(fd, cmd, ie->host_cmd, ret, buf_temp);
+#endif
             if (!is_error(ret)) {
                 argptr = lock_user(VERIFY_WRITE, arg, target_size, 0);
                 if (!argptr)
