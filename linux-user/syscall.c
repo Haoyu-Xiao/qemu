@@ -5696,10 +5696,10 @@ static abi_long do_sendto(int fd, abi_ulong msg, size_t len, int flags,
             if (ret) {
                 goto fail;
             }
+            ret = do_vsockfs_sendto(fd, host_msg, len, flags, addr, addrlen);
         } else {
-            addr = NULL;
+            ret = get_errno(safe_write(fd, host_msg, len));
         }
-        ret = do_vsockfs_sendto(fd, host_msg, len, flags, addr, target_addr ? addrlen : 0);
         goto fail;
     }
     if (fd_trans_target_to_host_data(fd)) {
@@ -5862,7 +5862,7 @@ static abi_long do_recvfrom(int fd, abi_ulong msg, size_t len, int flags,
                     g_free(transformed_control);
                 }
             } else {
-                ret = do_vsockfs_recvfrom(fd, host_msg, len, flags, NULL, NULL);
+                ret = get_errno(safe_read(fd, host_msg, len));
             }
         } else {
             ret = get_errno(safe_recvfrom(fd, host_msg, len, flags, NULL, 0));
