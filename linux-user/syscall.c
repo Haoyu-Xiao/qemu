@@ -1001,6 +1001,7 @@ static int vsockfs_open_flags(int target_type);
 static int vsockfs_strip_socket_flags(int host_type);
 static inline void ioctl_compat_log(int fd);
 static inline void ioctl_compat_flush(int fd);
+static bool sockfs_ioctl_passthrough_allowed(int cmd);
 #else
 static inline bool sockfs_fd_p(int fd)
 {
@@ -1944,6 +1945,15 @@ static abi_long do_ppoll(abi_long arg1, abi_long arg2, abi_long arg3,
         for (i = 0; i < nfds; i++) {
             pfd[i].fd = tswap32(target_pfd[i].fd);
             pfd[i].events = tswap16(target_pfd[i].events);
+#ifndef NO_EMU_HOOKS
+            if (sockfs_fd_p(pfd[i].fd)) {
+                int host_fd = sockfs_carrier_hostfd(pfd[i].fd);
+
+                if (host_fd >= 0) {
+                    pfd[i].fd = host_fd;
+                }
+            }
+#endif
         }
     }
     if (ppoll) {
@@ -5120,7 +5130,21 @@ static abi_long do_sendrecvmsg_locked(int fd, struct target_msghdr *msgp,
                     msg.msg_iov->iov_len = transformed_len;
                     ret = get_errno(safe_sendmsg(host_fd, &msg, compat_flags));
                 } else {
-                    ret = get_errno(safe_write(host_fd, transformed, transformed_len));
+                    struct iovec flat_iov = {
+                        .iov_base = transformed,
+                        .iov_len = transformed_len,
+                    };
+                    struct msghdr flat_msg = {
+                        .msg_name = NULL,
+                        .msg_namelen = 0,
+                        .msg_iov = &flat_iov,
+                        .msg_iovlen = 1,
+                        .msg_control = NULL,
+                        .msg_controllen = 0,
+                        .msg_flags = 0,
+                    };
+
+                    ret = get_errno(safe_sendmsg(host_fd, &flat_msg, compat_flags));
                 }
                 if (!is_error(ret) && has_ret_len) {
                     ret = ret_len;
@@ -5143,7 +5167,25 @@ static abi_long do_sendrecvmsg_locked(int fd, struct target_msghdr *msgp,
                         control_len = MIN(control_len, (size_t)msg.msg_controllen);
                     }
                 } else {
-                    ret = get_errno(safe_read(host_fd, flat_buf, total_len));
+                    struct iovec flat_iov = {
+                        .iov_base = flat_buf,
+                        .iov_len = total_len,
+                    };
+                    struct msghdr flat_msg = {
+                        .msg_name = NULL,
+                        .msg_namelen = 0,
+                        .msg_iov = &flat_iov,
+                        .msg_iovlen = 1,
+                        .msg_control = NULL,
+                        .msg_controllen = 0,
+                        .msg_flags = 0,
+                    };
+
+                    ret = get_errno(safe_recvmsg(host_fd, &flat_msg, flags));
+                    if (!is_error(ret)) {
+                        msg.msg_flags = flat_msg.msg_flags;
+                        compat_flags = flat_msg.msg_flags;
+                    }
                 }
                 if (!is_error(ret) && ret > 0) {
                     if (msg.msg_name != NULL || control_len > 0) {
@@ -5226,7 +5268,9 @@ static abi_long do_sendrecvmsg_locked(int fd, struct target_msghdr *msgp,
                                          msg.msg_name, msg.msg_namelen,
                                          control_buf, control_len);
             } else {
-                ret = get_errno(safe_write(fd, flat_buf, total_len));
+                ret = do_vsockfs_sendmsg(fd, flat_buf, total_len, flags,
+                                         NULL, 0,
+                                         NULL, 0);
             }
         } else {
             if (msg.msg_name != NULL || control_len > 0) {
@@ -5235,7 +5279,10 @@ static abi_long do_sendrecvmsg_locked(int fd, struct target_msghdr *msgp,
                                          control_buf, &control_len,
                                          &msg.msg_flags);
             } else {
-                ret = get_errno(safe_read(fd, flat_buf, total_len));
+                ret = do_vsockfs_recvmsg(fd, flat_buf, total_len, flags,
+                                         NULL, NULL,
+                                         NULL, NULL,
+                                         &msg.msg_flags);
             }
             if (!is_error(ret)) {
                 if (ret > 0) {
@@ -5628,14 +5675,12 @@ static abi_long do_sendto(int fd, abi_ulong msg, size_t len, int flags,
             if (is_error(ret)) {
                 goto fail;
             }
-            if (target_addr) {
-                ret = get_errno(safe_sendto(host_fd, transformed, transformed_len,
-                                            compat_flags,
-                                            (const struct sockaddr *)transformed_addr,
-                                            transformed_addr_len));
-            } else {
-                ret = get_errno(safe_write(host_fd, transformed, transformed_len));
-            }
+            ret = get_errno(safe_sendto(host_fd, transformed, transformed_len,
+                                        compat_flags,
+                                        target_addr
+                                            ? (const struct sockaddr *)transformed_addr
+                                            : NULL,
+                                        target_addr ? transformed_addr_len : 0));
             if (!is_error(ret) && has_ret_len) {
                 ret = ret_len;
             }
@@ -5651,10 +5696,10 @@ static abi_long do_sendto(int fd, abi_ulong msg, size_t len, int flags,
             if (ret) {
                 goto fail;
             }
-            ret = do_vsockfs_sendto(fd, host_msg, len, flags, addr, addrlen);
-            goto fail;
+        } else {
+            addr = NULL;
         }
-        ret = get_errno(safe_write(fd, host_msg, len));
+        ret = do_vsockfs_sendto(fd, host_msg, len, flags, addr, target_addr ? addrlen : 0);
         goto fail;
     }
     if (fd_trans_target_to_host_data(fd)) {
@@ -5777,7 +5822,7 @@ static abi_long do_recvfrom(int fd, abi_ulong msg, size_t len, int flags,
             int host_fd = sockfs_carrier_hostfd(fd);
 
             if (host_fd >= 0) {
-                ret = get_errno(safe_read(host_fd, host_msg, len));
+                ret = get_errno(safe_recvfrom(host_fd, host_msg, len, flags, NULL, 0));
                 if (!is_error(ret) && ret > 0) {
                     uint8_t *transformed = NULL;
                     uint8_t *transformed_addr = NULL;
@@ -5817,7 +5862,7 @@ static abi_long do_recvfrom(int fd, abi_ulong msg, size_t len, int flags,
                     g_free(transformed_control);
                 }
             } else {
-                ret = get_errno(safe_read(fd, host_msg, len));
+                ret = do_vsockfs_recvfrom(fd, host_msg, len, flags, NULL, NULL);
             }
         } else {
             ret = get_errno(safe_recvfrom(fd, host_msg, len, flags, NULL, 0));
@@ -7930,8 +7975,18 @@ static inline abi_long do_compat_write(abi_long arg1, abi_long arg2, abi_long ar
 static abi_long do_compat_ioctl(int fd, int cmd, abi_long arg) {
     abi_long ret;
     void *arg_buf;
-
+    int ioctl_fd = fd;
     int trans_cmd = ioctl_cmd_trans(cmd);
+
+#ifndef NO_EMU_HOOKS
+    if (sockfs_fd_p(fd) && sockfs_ioctl_passthrough_allowed(cmd)) {
+        int host_fd = sockfs_carrier_hostfd(fd);
+
+        if (host_fd >= 0) {
+            ioctl_fd = host_fd;
+        }
+    }
+#endif
 
     int cmd_io_size = host_ioc_size(cmd);
     if (cmd_io_size == 0) {
@@ -7944,14 +7999,20 @@ static abi_long do_compat_ioctl(int fd, int cmd, abi_long arg) {
     }
 
     if (!arg_buf) {
-        ret = get_errno(safe_ioctl(fd, trans_cmd, arg));
+        ret = get_errno(safe_ioctl(ioctl_fd, trans_cmd, arg));
     } else {
-        ret = get_errno(safe_ioctl(fd, trans_cmd, arg_buf));
+        ret = get_errno(safe_ioctl(ioctl_fd, trans_cmd, arg_buf));
     }
 
     if (arg_buf && cmd_io_size) {
         unlock_user(arg_buf, arg, cmd_io_size);
     }
+
+#ifndef NO_EMU_HOOKS
+    if (ioctl_fd != fd) {
+        return ret;
+    }
+#endif
 
     if (ret == -EINCOMPAT) {
         return do_compat_ioctl_internal(fd, trans_cmd, arg, 0);
@@ -7970,6 +8031,8 @@ static abi_long do_compat_ioctl_socket(const IOCTLEntry *ie, uint8_t *buf_temp,
 static bool sockfs_ioctl_passthrough_allowed(int cmd)
 {
     switch (cmd) {
+    case TARGET_FIONBIO:
+    case TARGET_FIONREAD:
     case TARGET_SIOCGIFNAME:
     case TARGET_SIOCGIFFLAGS:
     case TARGET_SIOCGIFADDR:
@@ -8029,6 +8092,7 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
     const IOCTLEntry *ie;
     const argtype *arg_type;
     abi_long ret;
+    int ioctl_fd = fd;
     uint8_t buf_temp[MAX_STRUCT_SIZE];
     int target_size;
     void *argptr;
@@ -8064,6 +8128,16 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
         return do_compat_ioctl(fd, cmd, arg);
     }
 #endif
+
+#ifndef NO_EMU_HOOKS
+    if (sockfs_fd_p(fd) && sockfs_ioctl_passthrough_allowed(cmd)) {
+        int host_fd = sockfs_carrier_hostfd(fd);
+
+        if (host_fd >= 0) {
+            ioctl_fd = host_fd;
+        }
+    }
+#endif
     // fprintf(stderr, "[qemu] ioctl ie %s (0x%lx) called\n", ie->name, (long)cmd);
     arg_type = ie->arg_type;
     if (ie->do_ioctl) {
@@ -8077,20 +8151,20 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
     switch(arg_type[0]) {
     case TYPE_NULL:
         /* no argument */
-        ret = get_errno(safe_ioctl(fd, ie->host_cmd));
+        ret = get_errno(safe_ioctl(ioctl_fd, ie->host_cmd));
         break;
     case TYPE_PTRVOID:
     case TYPE_INT:
     case TYPE_LONG:
     case TYPE_ULONG:
-        ret = get_errno(safe_ioctl(fd, ie->host_cmd, arg));
+        ret = get_errno(safe_ioctl(ioctl_fd, ie->host_cmd, arg));
         break;
     case TYPE_PTR:
         arg_type++;
         target_size = thunk_type_size(arg_type, 0);
         switch(ie->access) {
         case IOC_R:
-            ret = get_errno(safe_ioctl(fd, ie->host_cmd, buf_temp));
+            ret = get_errno(safe_ioctl(ioctl_fd, ie->host_cmd, buf_temp));
 #ifndef NO_EMU_HOOKS
             ret = sockfs_maybe_passthrough_ioctl_error(fd, cmd, ie->host_cmd, ret, buf_temp);
 #endif
@@ -8108,7 +8182,7 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
                 return -TARGET_EFAULT;
             thunk_convert(buf_temp, argptr, arg_type, THUNK_HOST);
             unlock_user(argptr, arg, 0);
-            ret = get_errno(safe_ioctl(fd, ie->host_cmd, buf_temp));
+            ret = get_errno(safe_ioctl(ioctl_fd, ie->host_cmd, buf_temp));
 #ifndef NO_EMU_HOOKS
             ret = sockfs_maybe_passthrough_ioctl_error(fd, cmd, ie->host_cmd, ret, buf_temp);
 #endif
@@ -8120,7 +8194,7 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
                 return -TARGET_EFAULT;
             thunk_convert(buf_temp, argptr, arg_type, THUNK_HOST);
             unlock_user(argptr, arg, 0);
-            ret = get_errno(safe_ioctl(fd, ie->host_cmd, buf_temp));
+            ret = get_errno(safe_ioctl(ioctl_fd, ie->host_cmd, buf_temp));
 #ifndef NO_EMU_HOOKS
             ret = sockfs_maybe_passthrough_ioctl_error(fd, cmd, ie->host_cmd, ret, buf_temp);
 #endif
@@ -9709,7 +9783,19 @@ static abi_long do_fcntl(int fd, int cmd, abi_ulong arg)
         break;
 
     case TARGET_F_GETFL:
-        ret = get_errno(safe_fcntl(fd, host_cmd, arg));
+        {
+            int status_fd = fd;
+
+            if (sockfs_fd_p(fd)) {
+                int host_fd = sockfs_carrier_hostfd(fd);
+
+                if (host_fd >= 0) {
+                    status_fd = host_fd;
+                }
+            }
+
+            ret = get_errno(safe_fcntl(status_fd, host_cmd, arg));
+        }
         if (ret >= 0) {
             ret = host_to_target_bitmask(ret, fcntl_flags_tbl);
             /* tell 32-bit guests it uses largefile on 64-bit hosts: */
@@ -9720,9 +9806,21 @@ static abi_long do_fcntl(int fd, int cmd, abi_ulong arg)
         break;
 
     case TARGET_F_SETFL:
-        ret = get_errno(safe_fcntl(fd, host_cmd,
-                                   target_to_host_bitmask(arg,
-                                                          fcntl_flags_tbl)));
+        {
+            int status_fd = fd;
+
+            if (sockfs_fd_p(fd)) {
+                int host_fd = sockfs_carrier_hostfd(fd);
+
+                if (host_fd >= 0) {
+                    status_fd = host_fd;
+                }
+            }
+
+            ret = get_errno(safe_fcntl(status_fd, host_cmd,
+                                       target_to_host_bitmask(arg,
+                                                              fcntl_flags_tbl)));
+        }
         break;
 
     case TARGET_F_DUPFD:
@@ -14558,6 +14656,60 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         {
             struct iovec *vec = lock_iovec(VERIFY_WRITE, arg2, arg3, 0);
             if (vec != NULL) {
+#ifndef NO_EMU_HOOKS
+                if (sockfs_fd_p(arg1)) {
+                    int host_fd = sockfs_carrier_hostfd(arg1);
+
+                    if (host_fd >= 0) {
+                        size_t total_len = iov_total_len(vec, arg3);
+                        size_t alloc_len = MAX((size_t)1, total_len);
+                        char *flat_buf = g_malloc(alloc_len);
+
+                        ret = get_errno(safe_read(host_fd, flat_buf, total_len));
+                        if (ret > 0) {
+                            uint8_t *transformed = NULL;
+                            uint8_t *transformed_addr = NULL;
+                            uint8_t *transformed_control = NULL;
+                            size_t transformed_len = 0;
+                            size_t transformed_addr_len = 0;
+                            size_t transformed_control_len = 0;
+                            size_t ret_len = 0;
+                            bool has_ret_len = false;
+                            int compat_flags = 0;
+                            abi_long compat_ret =
+                                do_vsockfs_transform_host_data(arg1,
+                                                               VSOCKFS_DATA_COMPAT_OP_POST_RECV,
+                                                               (uint8_t *)flat_buf, ret,
+                                                               NULL, 0,
+                                                               NULL, 0,
+                                                               &compat_flags,
+                                                               &transformed,
+                                                               &transformed_len,
+                                                               &transformed_addr,
+                                                               &transformed_addr_len,
+                                                               &transformed_control,
+                                                               &transformed_control_len,
+                                                               &has_ret_len, &ret_len);
+                            if (is_error(compat_ret)) {
+                                ret = compat_ret;
+                            } else {
+                                size_t copy_len = MIN(transformed_len, total_len);
+
+                                if (copy_len > 0) {
+                                    iov_scatter(vec, arg3, (const char *)transformed, copy_len);
+                                }
+                                ret = has_ret_len ? ret_len : copy_len;
+                            }
+                            g_free(transformed);
+                            g_free(transformed_addr);
+                            g_free(transformed_control);
+                        }
+                        g_free(flat_buf);
+                        unlock_iovec(vec, arg2, arg3, 1);
+                        return ret;
+                    }
+                }
+#endif
                 ret = get_errno(safe_readv(arg1, vec, arg3));
                 unlock_iovec(vec, arg2, arg3, 1);
             } else {
@@ -14569,6 +14721,59 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         {
             struct iovec *vec = lock_iovec(VERIFY_READ, arg2, arg3, 1);
             if (vec != NULL) {
+#ifndef NO_EMU_HOOKS
+                if (sockfs_fd_p(arg1)) {
+                    int host_fd = sockfs_carrier_hostfd(arg1);
+
+                    if (host_fd >= 0) {
+                        size_t total_len = iov_total_len(vec, arg3);
+                        size_t alloc_len = MAX((size_t)1, total_len);
+                        char *flat_buf = g_malloc(alloc_len);
+                        uint8_t *transformed = NULL;
+                        uint8_t *transformed_addr = NULL;
+                        uint8_t *transformed_control = NULL;
+                        size_t transformed_len = 0;
+                        size_t transformed_addr_len = 0;
+                        size_t transformed_control_len = 0;
+                        size_t ret_len = 0;
+                        bool has_ret_len = false;
+                        int compat_flags = 0;
+                        abi_long compat_ret;
+
+                        if (total_len > 0) {
+                            iov_flatten(flat_buf, vec, arg3);
+                        }
+                        compat_ret =
+                            do_vsockfs_transform_host_data(arg1,
+                                                           VSOCKFS_DATA_COMPAT_OP_PRE_SEND,
+                                                           (uint8_t *)flat_buf, total_len,
+                                                           NULL, 0,
+                                                           NULL, 0,
+                                                           &compat_flags,
+                                                           &transformed,
+                                                           &transformed_len,
+                                                           &transformed_addr,
+                                                           &transformed_addr_len,
+                                                           &transformed_control,
+                                                           &transformed_control_len,
+                                                           &has_ret_len, &ret_len);
+                        if (is_error(compat_ret)) {
+                            ret = compat_ret;
+                        } else {
+                            ret = get_errno(safe_write(host_fd, transformed, transformed_len));
+                            if (!is_error(ret) && has_ret_len) {
+                                ret = ret_len;
+                            }
+                        }
+                        g_free(transformed);
+                        g_free(transformed_addr);
+                        g_free(transformed_control);
+                        g_free(flat_buf);
+                        unlock_iovec(vec, arg2, arg3, 0);
+                        return ret;
+                    }
+                }
+#endif
                 ret = get_errno(safe_writev(arg1, vec, arg3));
                 unlock_iovec(vec, arg2, arg3, 0);
             } else {
@@ -16619,6 +16824,16 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
     {
         struct epoll_event ep;
         struct epoll_event *epp = 0;
+        int target_fd = arg3;
+#ifndef NO_EMU_HOOKS
+        if (sockfs_fd_p(target_fd)) {
+            int host_fd = sockfs_carrier_hostfd(target_fd);
+
+            if (host_fd >= 0) {
+                target_fd = host_fd;
+            }
+        }
+#endif
         if (arg4) {
             if (arg2 != EPOLL_CTL_DEL) {
                 struct target_epoll_event *target_ep;
@@ -16641,7 +16856,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             */
             epp = &ep;
         }
-        return get_errno(epoll_ctl(arg1, arg2, arg3, epp));
+        return get_errno(epoll_ctl(arg1, arg2, target_fd, epp));
     }
 #endif
 
